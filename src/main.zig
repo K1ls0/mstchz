@@ -6,7 +6,7 @@ const ansii = @import("ansii.zig");
 
 pub const std_options = std.Options{
     .log_level = .info,
-    .logFn = logFn,
+    //.logFn = logFn,
 };
 
 pub fn logFn(
@@ -33,8 +33,11 @@ const LogState = struct {
     mutex: std.Thread.Mutex = .{},
     buffering: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator) LogState {
-        return .{ .buf = .init(alloc), .out_writer = std.io.getStdErr().writer() };
+    pub fn init(
+        state: *LogState,
+        alloc: std.mem.Allocator,
+    ) void {
+        state.* = .{ .buf = .init(alloc), .out_writer = std.io.getStdErr().writer() };
     }
 
     pub fn deinit(self: *LogState) void {
@@ -53,7 +56,7 @@ const LogState = struct {
 
         if (self.buffering) return;
 
-        std.debug.print("-....flushing because no explicit buffering:\n'{s}'\n", .{self.buf.items});
+        //std.debug.print("-....flushing because no explicit buffering:\n'{s}'\n", .{self.buf.items});
 
         try self.out_writer.writeAll(self.buf.items);
         self.buf.clearRetainingCapacity();
@@ -63,7 +66,7 @@ const LogState = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        std.debug.print("-....flushing because always does: \n'{s}'\n", .{self.buf.items});
+        //std.debug.print("-....flushing because always does: \n'{s}'\n", .{self.buf.items});
 
         try self.out_writer.writeAll(self.buf.items);
         self.buf.clearRetainingCapacity();
@@ -90,8 +93,10 @@ const LogState = struct {
     fn write(ctx: *LogState, bytes: []const u8) WriteError!usize {
         ctx.mutex.lock();
         defer ctx.mutex.unlock();
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
 
-        std.debug.print("==== Got here! '{s}'\n\n", .{bytes});
+        //std.debug.print("==== Got here (bytes.len: {})! '{s}'\n\n", .{ bytes.len, bytes });
 
         return try ctx.buf.writer().write(bytes);
     }
@@ -111,7 +116,7 @@ pub fn main() !void {
     defer std.debug.assert(dbg_alloc.deinit() == .ok);
     const alloc = dbg_alloc.allocator();
 
-    log_state = .init(alloc);
+    LogState.init(&log_state, alloc);
     defer log_state.deinit();
 
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -122,7 +127,7 @@ pub fn main() !void {
     var all_testcases: usize = 0;
     var all_fails: usize = 0;
     const pcli = parseCli(arena.allocator());
-    log_state.setExplicitBuffering(true);
+    log_state.setExplicitBuffering(false);
     for (pcli.files) |file| {
         log.info("=========== {s} ===========", .{std.fs.path.basename(file)});
         log.info("=========== START ===========", .{});
@@ -190,8 +195,6 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
         else
             std.json.ObjectMap.init(tmp_alloc);
 
-        _ = expected_str;
-        _ = data;
         _ = partials;
 
         log.info(ansii.fg.bright_cyan ++ "Test" ++ ansii.rst ++ ": {s} ({s})", .{ name, desc });
@@ -205,23 +208,24 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
                 break :blk true;
             };
 
-            log.info("\tTokens:", .{});
-            for (doc_struct_token) |token| {
-                switch (token.tag) {
-                    .text => log.info("\t\ttext: '{s}'", .{token.body.s}),
-                    .tag => {
-                        log.info("\t\ttag: {s} {{", .{@tagName(token.body.t.type)});
-                        for (token.body.t.body) |path_part| {
-                            log.info("\t\t\tpath: '{s}'", .{path_part});
-                        }
-                        log.info("\t\t}}", .{});
-                    },
-                }
-                //if (token.tag != .tag) continue;
-                //const tag_expr = try mstchz.token.Token.parse(tmp_alloc, token);
-                //_ = tag_expr;
-            }
+            var partials_map = std.StringHashMap(mstchz.Partial).init(tmp_alloc);
+            var vm = mstchz.State.init(
+                tmp_alloc,
+                data,
+                &partials_map,
+                doc_struct_token,
+            );
+            defer vm.deinit();
 
+            var out_buf = std.ArrayList(u8).init(tmp_alloc);
+            vm.render(out_buf.writer()) catch |e| {
+                log.err("Error: {}", .{e});
+                break :blk true;
+            };
+            log.info("\tRendered: '{s}'", .{out_buf.items});
+            log.info("\tExpected: '{s}'", .{expected_str});
+
+            if (!std.mem.eql(u8, out_buf.items, expected_str)) break :blk true;
             break :blk false;
         };
 

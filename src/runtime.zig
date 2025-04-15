@@ -3,6 +3,8 @@ const testing = std.testing;
 const mem = std.mem;
 const log = std.log.scoped(.@"mustachez.runtime");
 const assert = std.debug.assert;
+const token = @import("token.zig");
+const Partial = @import("Partial.zig");
 
 const mappings = .{
     .{ .code = '<', .esc = "&lt;" },
