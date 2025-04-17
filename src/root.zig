@@ -348,14 +348,14 @@ pub const State = struct {
 
                         const partial_name = t.body[0];
                         const chash = scopes.currentHash();
-                        const partial = self.partials.*.get(partial_name) orelse return {
-                            log.err("Could not find partial with name '{s}'", .{partial_name});
-                            return error.PartialNotAvailable;
-                        };
-                        var state = State.init(self.exec_arena.allocator(), chash, self.partials, partial);
-                        defer state.deinit();
+                        if (self.partials.*.get(partial_name)) |partial| {
+                            var state = State.init(self.exec_arena.allocator(), chash, self.partials, partial);
+                            defer state.deinit();
 
-                        try state.render(writer);
+                            try state.render(writer);
+                        } else {
+                            log.info("Could not find partial with name '{s}'", .{partial_name});
+                        }
                     },
                     //else => {
                     //    log.err("unsupported token {s}", .{@tagName(t.type)});

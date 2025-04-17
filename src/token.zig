@@ -146,29 +146,39 @@ pub const DocToken = union(DocTokenTag) {
                 else => {},
             }
 
-            if ((i != 0) and tokens[i - 1] == .text) {
+            var prev_target_text: ?[]const u8 = null;
+            var next_target_text: ?[]const u8 = null;
+            if ((i == 0)) {
+                prev_target_text = "";
+            } else if (tokens[i - 1] == .text) {
                 const old_txt = tokens[i - 1].text;
-                const target_txt = &tokens[i - 1].text;
-                switch (findNewline(old_txt, .backward)) {
-                    .found => |v| target_txt.* = old_txt[0 .. v + 1],
-                    .non_whitespace => continue,
-                    .not_found => {
-                        if ((i - 1) == 0) {
-                            // this token is the first one, trim to the start of the file as per spec.
-                            target_txt.* = "";
-                        } else continue;
-                    },
-                }
+                prev_target_text = switch (findNewline(old_txt, .backward)) {
+                    .found => |v| old_txt[0 .. v + 1],
+                    .non_whitespace => null,
+                    // This token is the first one, trim to the start of the file as per spec.
+                    .not_found => if ((i - 1) == 0) "" else null,
+                };
             }
 
-            if ((i != (tokens.len - 1)) and tokens[i + 1] == .text) {
+            if (i == (tokens.len - 1)) {
+                next_target_text = "";
+            } else if (tokens[i + 1] == .text) {
                 const old_txt = tokens[i + 1].text;
-                const next_newline_idx = switch (findNewline(old_txt, .forward)) {
-                    .found => |v| v,
-                    .non_whitespace, .not_found => continue,
+                log.info("next trimming: i+1: {} tokens.len - 1: {}", .{ i + 1, tokens.len - 1 });
+                next_target_text = switch (findNewline(old_txt, .forward)) {
+                    .found => |v| old_txt[v + 1 ..],
+                    .non_whitespace => null,
+                    // This token is the last one, trim to the end of the file as per spec.
+                    .not_found => if ((i + 1) == (tokens.len - 1)) "" else null,
                 };
-                tokens[i + 1].text = old_txt[next_newline_idx + 1 ..];
             }
+
+            //if ((i != (tokens.len - 1)) and tokens[i + 1] == .text) {} else if (i == (tokens.len - 1)) {}
+
+            if (prev_target_text) |pttxt| if (next_target_text) |nttxt| {
+                if (i != 0) tokens[i - 1].text = pttxt;
+                if (i != (tokens.len - 1)) tokens[i + 1].text = nttxt;
+            };
         }
     }
 
