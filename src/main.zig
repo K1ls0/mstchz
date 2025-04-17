@@ -4,8 +4,11 @@ const log = std.log;
 const mstchz = @import("mstchz");
 const ansii = @import("ansii.zig");
 
+const new_ckey = "include";
+const new_cval: []const mstchz.token.DocToken = &.{};
+
 pub const std_options = std.Options{
-    .log_level = .info,
+    .log_level = .debug,
     //.logFn = logFn,
 };
 
@@ -116,6 +119,15 @@ pub fn main() !void {
     defer std.debug.assert(dbg_alloc.deinit() == .ok);
     const alloc = dbg_alloc.allocator();
 
+    {
+        var v = mstchz.PartialMap.init(alloc);
+        defer v.deinit();
+
+        try v.put(new_ckey, new_cval);
+
+        _ = v.get(new_ckey);
+    }
+
     LogState.init(&log_state, alloc);
     defer log_state.deinit();
 
@@ -129,9 +141,9 @@ pub fn main() !void {
     const pcli = parseCli(arena.allocator());
     log_state.setExplicitBuffering(false);
     for (pcli.files) |file| {
+        defer _ = test_arena.reset(.retain_capacity);
         log.info("=========== {s} ===========", .{std.fs.path.basename(file)});
         log.info("=========== START ===========", .{});
-        defer _ = test_arena.reset(.retain_capacity);
         const r = try testFile(test_arena.allocator(), file);
         const res_string = if (r.fails == 0) success_str else fail_str;
 
@@ -190,29 +202,50 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
         const data = case.get("data").?;
         const template = case.get("template").?.string;
         const expected_str = case.get("expected").?.string;
-        const partials = if (case.get("partials")) |v|
+        const partials_json = if (case.get("partials")) |v|
             v.object
         else
             std.json.ObjectMap.init(tmp_alloc);
 
-        _ = partials;
+        var partials = mstchz.PartialMap.init(tmp_alloc);
+        {
+            var it = partials_json.iterator();
+            while (it.next()) |item| {
+                const parsed = try mstchz.token.DocToken.parseSliceLeaky(tmp_alloc, item.value_ptr.string);
+                try partials.put(item.key_ptr.*, parsed);
+            }
+        }
 
         log.info(ansii.fg.bright_cyan ++ "Test" ++ ansii.rst ++ ": {s} ({s})", .{ name, desc });
+
+        log.info("\tData: {s}", .{try std.json.stringifyAlloc(tmp_alloc, data, .{ .whitespace = .indent_4 })});
         log.info("\ttemplate: `{s}`", .{template});
+        log.info("\tpartials: `{s}`", .{try std.json.stringifyAlloc(tmp_alloc, std.json.Value{ .object = partials_json }, .{ .whitespace = .indent_4 })});
         //log.info("\texpected: '{s}'", .{expected_str});
         log.info("\tParsing..", .{});
         const failed = blk: {
-            const doc_struct_token = mstchz.token.DocumentStructureToken.parseSliceLeaky(tmp_alloc, template) catch |e| {
+            const doc_struct_token = mstchz.token.DocToken.parseSliceLeaky(tmp_alloc, template) catch |e| {
                 log.err("Error occured: {}", .{e});
                 if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
                 break :blk true;
             };
 
-            var partials_map = std.StringHashMap(mstchz.Partial).init(tmp_alloc);
+            log.info("Tokens:", .{});
+            for (doc_struct_token) |token| switch (token) {
+                .text => |d| log.info("\tTEXT '{s}'", .{d}),
+                .tag => |d| {
+                    log.info("\tTAG {}", .{d.type});
+                    for (d.body) |item| {
+                        log.info("\t\t{} '{s}'", .{ item.len, item });
+                    }
+                },
+            };
+
+            log.info("partial include: {any}", .{partials.get("include")});
             var vm = mstchz.State.init(
                 tmp_alloc,
-                data,
-                &partials_map,
+                mstchz.Hash{ .inner = data },
+                &partials,
                 doc_struct_token,
             );
             defer vm.deinit();
@@ -275,6 +308,7 @@ fn printHelpAndExit(
     args: anytype,
     opts: struct { code: u8 = 1 },
 ) noreturn {
+    _ = opts;
     if (comptime fmt.len != 0) {
         std.debug.print(fmt ++ "\n\n", args);
     }
@@ -288,6 +322,4 @@ fn printHelpAndExit(
         \\
         \\
     , .{exec_name});
-
-    std.process.exit(opts.code);
 }
