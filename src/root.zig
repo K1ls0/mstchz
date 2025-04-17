@@ -38,8 +38,8 @@ pub const Hash = struct {
             .float => |f| f != 0.0 and f != std.math.nan(f64),
             .number_string => @panic("Unsupported BigNumbers"),
             .string => |s| s.len != 0,
-            .object => true,
-            .array => true,
+            .object => |o| o.count() != 0,
+            .array => |a| a.items.len != 0,
         };
     }
 
@@ -196,7 +196,7 @@ pub const State = struct {
         try scopes.push(Scope{
             .start_tag = null,
             .state = .{ .block = .{ .hash = self.hash, .block_state = .run } },
-        });
+        }, &.{});
 
         var token_idx: usize = 0;
 
@@ -226,6 +226,9 @@ pub const State = struct {
                     .comment => assert(t.body.len == 1),
                     .delimiter_change => assert(t.body.len == 2),
                     .variable, .unescaped_variable => |any_variable| {
+                        log.info("[variable] current hash global lookup:", .{});
+                        scopes.printCurrentLookup();
+
                         const chash = scopes.currentHash();
                         const sub_hash = chash.sub(t.body) catch continue;
 
@@ -241,11 +244,11 @@ pub const State = struct {
                         }
                     },
                     .section_open => { // TODO:
-                        log.info("<======= section open start =======>", .{});
-                        defer log.info("<======= section open END =======>", .{});
                         const current_is_skip = scopes.currentScope().blockState() == .skip;
 
                         var sub_hash: ?Hash = if (scopes.currentHash().sub(t.body)) |ch| ch else |_| null;
+                        log.info("[section open] current hash global lookup:", .{});
+                        scopes.printCurrentLookup();
 
                         const new_scope = if (sub_hash) |ch| blk: {
                             // We are skipping already, but still need to keep track of tags,
@@ -280,23 +283,37 @@ pub const State = struct {
                             .start_tag = token_idx,
                         };
 
-                        try scopes.push(new_scope);
+                        try scopes.push(new_scope, t.body);
                     },
                     .inverted_section_open => {
                         const current_is_skip = scopes.currentScope().blockState() == .skip;
 
-                        const as_bool = if (scopes.currentHash().sub(t.body)) |ch|
-                            ch.interpolateBool()
-                        else |_|
-                            false;
+                        const run_section = if (scopes.currentHash().sub(t.body)) |ch| blk: {
+                            log.info("got hash", .{});
+                            {
+                                const as_str = std.json.stringifyAlloc(
+                                    self.exec_arena.allocator(),
+                                    ch,
+                                    .{},
+                                ) catch @panic("OOM");
+                                log.info("[inverted] current_ctx: {s}", .{as_str});
+                            }
+                            break :blk !ch.interpolateBool();
+                        } else |_| blk: {
+                            log.info("no hash", .{});
+                            break :blk true;
+                        };
+                        log.info("[inverted] run_section: {any} is_skip: {}", .{ run_section, current_is_skip });
 
                         try scopes.push(Scope{
                             .state = .{ .block = .{
                                 .hash = null,
-                                .block_state = if (as_bool or current_is_skip) .skip else .run,
+                                .block_state = if (current_is_skip)
+                                    .skip
+                                else if (run_section) .run else .skip,
                             } },
                             .start_tag = token_idx,
-                        });
+                        }, t.body);
                     },
                     .section_close => {
                         const cscope = scopes.currentScope();
@@ -306,14 +323,17 @@ pub const State = struct {
                             return error.UnclosedTag;
                         }
 
+                        log.info("[section close] current lookup", .{});
+                        scopes.printCurrentLookup();
+
                         switch (cscope.state) {
-                            .block => |_| _ = scopes.pop(),
+                            .block => |_| _ = scopes.pop(t.body),
                             .iter => |*it| {
                                 _ = it.next();
                                 if (it.peek()) |_| {
                                     token_idx = cscope.start_tag.?;
                                 } else {
-                                    _ = scopes.pop();
+                                    _ = scopes.pop(t.body);
                                 }
                             },
                         }
@@ -348,22 +368,34 @@ pub const State = struct {
 };
 
 pub const Scopes = struct {
+    debug_lookup: std.ArrayList([]const u8),
+
     stack: std.ArrayList(Scope),
 
     pub fn init(allocator: mem.Allocator) mem.Allocator.Error!Scopes {
-        return Scopes{ .stack = try .initCapacity(allocator, 8) };
+        return Scopes{
+            .debug_lookup = try .initCapacity(allocator, 16),
+            .stack = try .initCapacity(allocator, 8),
+        };
     }
 
     pub fn deinit(self: Scopes) void {
+        self.debug_lookup.deinit();
         self.stack.deinit();
     }
 
-    pub fn push(self: *Scopes, scope: Scope) mem.Allocator.Error!void {
+    pub fn push(self: *Scopes, scope: Scope, accessors: []const []const u8) mem.Allocator.Error!void {
+        try self.debug_lookup.appendSlice(accessors);
+
         try self.stack.append(scope);
     }
 
-    pub fn pop(self: *Scopes) Scope {
+    pub fn pop(self: *Scopes, accessors: []const []const u8) Scope {
         assert(self.stack.items.len > 0);
+        for (0..accessors.len) |u| {
+            const i = accessors.len - 1 - u;
+            assert(std.mem.eql(u8, accessors[i], self.debug_lookup.pop().?));
+        }
         return self.stack.pop().?;
     }
 
@@ -372,10 +404,11 @@ pub const Scopes = struct {
         assert(self.stack.items[0].state == .block);
         assert(self.stack.items[0].state.block.hash != null);
 
-        for (self.stack.items) |cstack| {
-            switch (cstack.state) {
+        for (0..self.stack.items.len) |u| {
+            const i = self.stack.items.len - 1 - u;
+            switch (self.stack.items[i].state) {
                 .block => |b| if (b.hash) |h| return h,
-                .iter => |*i| if (i.peek()) |h| return h,
+                .iter => |*it| if (it.peek()) |h| return h,
             }
         }
         @panic("At least the root scope has to be occupied, so this should not happen " ++
@@ -385,6 +418,16 @@ pub const Scopes = struct {
     pub fn currentScope(self: Scopes) *Scope {
         assert(self.stack.items.len > 0);
         return &self.stack.items[self.stack.items.len - 1];
+    }
+    fn printCurrentLookup(self: Scopes) void {
+        var buf = std.ArrayList(u8).initCapacity(self.stack.allocator, 1024) catch @panic("OOM");
+        defer buf.deinit();
+        const writer = buf.writer();
+        for (self.debug_lookup.items, 0..) |scope, i| {
+            if (i != 0) writer.writeAll(":") catch @panic("OOM");
+            writer.writeAll(scope) catch @panic("OOM");
+        }
+        log.info("lookup stack: {s}", .{buf.items});
     }
 };
 
