@@ -5,7 +5,7 @@ const log = std.log.scoped(.mustachez);
 const assert = std.debug.assert;
 
 pub const token = @import("token.zig");
-pub const runtime = @import("runtime.zig");
+pub const escape = @import("escape.zig");
 pub const Tokenizer = @import("Tokenizer.zig");
 pub const parseSliceLeaky = Tokenizer.parseSliceLeaky;
 
@@ -213,17 +213,6 @@ pub const State = struct {
 
         while (token_idx < self.input.len) : (token_idx += 1) {
             const ctoken = self.input[token_idx];
-            log.info("ctoken: {}: {s} -> '{s}'", .{ token_idx, @tagName(ctoken), @as([]const u8, switch (ctoken) {
-                .text => |t| t,
-                .tag => |t| @tagName(t.type),
-            }) });
-            if (self.scopes.currentScope().blockState() == .skip) {
-                log.info("In skipping mode:", .{});
-                switch (ctoken) {
-                    .text => log.info("\tText", .{}),
-                    .tag => |t| log.info("\tTag: {s}", .{@tagName(t.type)}),
-                }
-            }
 
             switch (ctoken) {
                 .text => |txt| {
@@ -253,14 +242,12 @@ pub const State = struct {
                     .comment => assert(t.body.len == 1),
                     .delimiter_change => assert(t.body.len == 2),
                     .variable, .unescaped_variable => |any_variable| {
-                        self.scopes.printCurrentLookup();
-
                         const sub_hash = self.scopes.lookup(t.body) orelse continue;
 
                         if (self.scopes.currentScope().blockState() == .skip) continue;
                         switch (any_variable) {
                             .variable => {
-                                var encoding_writer = runtime.escapingWriter(writer);
+                                var encoding_writer = escape.escapingWriter(writer);
                                 const ewriter = encoding_writer.writer();
                                 try sub_hash.stringify(ewriter);
                             },
@@ -272,8 +259,6 @@ pub const State = struct {
                         const current_is_skip = self.scopes.currentScope().blockState() == .skip;
 
                         const sub_hash: ?Hash = self.scopes.lookup(t.body) orelse null;
-                        log.info("[section open] current hash global lookup:", .{});
-                        self.scopes.printCurrentLookup();
 
                         const new_scope = if (sub_hash) |ch| blk: {
                             // We are skipping already, but still need to keep track of tags,
@@ -318,21 +303,10 @@ pub const State = struct {
                         const current_is_skip = self.scopes.currentScope().blockState() == .skip;
 
                         const run_section = if (self.scopes.lookup(t.body)) |ch| blk: {
-                            log.info("got hash", .{});
-                            {
-                                const as_str = std.json.stringifyAlloc(
-                                    self.exec_arena.allocator(),
-                                    ch,
-                                    .{},
-                                ) catch @panic("OOM");
-                                log.info("[inverted] current_ctx: {s}", .{as_str});
-                            }
                             break :blk !ch.interpolateBool();
                         } else blk: {
-                            log.info("no hash", .{});
                             break :blk true;
                         };
-                        log.info("[inverted] run_section: {any} is_skip: {}", .{ run_section, current_is_skip });
 
                         try self.scopes.push(Scope{
                             .state = .{ .block = .{
@@ -352,9 +326,6 @@ pub const State = struct {
                             return error.UnclosedTag;
                         }
 
-                        log.info("[section close] current lookup", .{});
-                        self.scopes.printCurrentLookup();
-
                         switch (cscope.state) {
                             .block => |_| _ = self.scopes.pop(t.body),
                             .iter => |*it| {
@@ -368,7 +339,6 @@ pub const State = struct {
                         }
                     },
                     .partial => {
-                        log.info("standalone ? {}", .{t.standalone_line_prefix != null});
                         assert(t.body.len == 1);
                         if (self.scopes.currentScope().blockState() == .skip) continue;
 
@@ -384,26 +354,10 @@ pub const State = struct {
                             );
                             defer state.deinit();
                             try state.render(writer);
-
-                            for (partial) |p| {
-                                switch (p) {
-                                    .text => |ct| {
-                                        log.info("\tTEXT: {s}", .{ct});
-                                    },
-                                    .tag => |ct| {
-                                        log.info("\tTAG {s}", .{@tagName(ct.type)});
-                                    },
-                                }
-                            }
-                            // TODO:
                         } else {
                             log.info("Could not find partial with name '{s}'", .{partial_name});
                         }
                     },
-                    //else => {
-                    //    log.err("unsupported token {s}", .{@tagName(t.type)});
-                    //    return error.Unsupported;
-                    //},
                 },
             }
         }
@@ -472,7 +426,7 @@ pub const Scopes = struct {
         return &self.stack.items[self.stack.items.len - 1];
     }
 
-    fn printCurrentLookup(self: Scopes) void {
+    pub fn printCurrentLookup(self: Scopes) void {
         var buf = std.ArrayList(u8).initCapacity(self.stack.allocator, 1024) catch @panic("OOM");
         defer buf.deinit();
         const writer = buf.writer();
@@ -524,85 +478,8 @@ pub const Scopes = struct {
     }
 };
 
-pub fn InsertingWriter(comptime W: type) type {
-    return struct {
-        const Self = @This();
-
-        prev_byte: u8,
-        marker: u8,
-        to_insert: []const u8,
-        w: W,
-
-        pub const Writer = std.io.GenericWriter(*Self, W.Error, write);
-
-        fn write(ctx: *Self, bytes: []const u8) !usize {
-            if (ctx.to_insert.len == 0) return try ctx.w.write(bytes);
-
-            var start: usize = 0;
-            for (bytes, 0..) |b, i| {
-                if (b == ctx.marker) {
-                    try ctx.w.writeAll(bytes[start..i]);
-                    try ctx.w.writeAll(ctx.to_insert);
-                    start = i;
-                }
-                ctx.prev_byte = b;
-            }
-            try ctx.w.writeAll(bytes[start..]);
-            return bytes.len;
-        }
-
-        pub fn writer(self: *Self) Writer {
-            return Writer{ .context = self };
-        }
-    };
-}
-
-pub fn insertingWriter(
-    writer: anytype,
-    opts: struct {
-        marker: u8,
-        to_insert: []const u8,
-        insert_at_start: bool = false,
-    },
-) InsertingWriter(@TypeOf(writer)) {
-    return InsertingWriter(@TypeOf(writer)){
-        .prev_byte = if (opts.insert_at_start) opts.marker else (opts.marker +% 1),
-        .marker = opts.marker,
-        .to_insert = opts.to_insert,
-        .w = writer,
-    };
-}
-
-fn testInsertingWriter(alloc: mem.Allocator, input: []const u8) ![]const u8 {
-    var buf = std.ArrayList(u8).init(alloc);
-    var inserting_writer = insertingWriter(buf.writer(), .{
-        .to_insert = "|",
-        .marker = '\n',
-        .insert_at_start = false,
-    });
-    const writer = inserting_writer.writer();
-
-    try writer.writeAll(input);
-
-    return try buf.toOwnedSlice();
-}
-
-test "insertingWriter" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    try testing.expectEqualStrings(
-        "abcdef",
-        try testInsertingWriter(arena.allocator(), "abcdef"),
-    );
-    try testing.expectEqualStrings(
-        "abc\n|def",
-        try testInsertingWriter(arena.allocator(), "abc\ndef"),
-    );
-}
-
 test {
     _ = @import("token.zig");
-    _ = @import("token.zig");
     _ = @import("Tokenizer.zig");
+    _ = @import("inserting_writer.zig");
 }

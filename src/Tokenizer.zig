@@ -55,7 +55,6 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
         assert(self.idx >= self.token_start);
 
         const cc = self.input[self.idx];
-        //std.debug.print("[{}] '{c}' start: {?any}\n", .{ self.idx, cc, self.standalone_range });
         switch (self.state) {
             .text => {
                 if (cc == '\n') {
@@ -72,7 +71,6 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
 
                 if (std.mem.startsWith(u8, self.input[self.idx..], self.tag_start)) {
                     // Start new tag and set standalone prefix bounds
-                    log.info("starts with tag start '{s}' (idx: {})\n", .{ self.tag_start, self.idx });
                     if (self.standalone_range) |*s| s.len = self.idx - s.start;
 
                     const txt = self.input[self.token_start..self.idx];
@@ -105,26 +103,16 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
 
                 const reached_end_tag = std.mem.startsWith(u8, self.input[self.idx..], self.tag_end);
                 if (self.brace_depth == 0 and reached_end_tag) {
-                    log.info("tag with end: '{s}'", .{self.input[self.idx..(@min(self.idx + 20, self.input.len))]});
                     const tag_end_idx = self.idx + self.tag_end.len;
                     const tag_txt = self.input[self.token_start + self.tag_start.len .. self.idx];
                     var parsed_tag = try parseToken(self.alloc, tag_txt);
 
                     // previous token was a standalone token
                     if (self.standalone_range) |*standalone_range| {
-                        //std.debug.print("standalone start at: {} (starting from {} ({c}))\n", .{
-                        //    start_i,
-                        //    tag_end_idx + 1,
-                        //    self.input[tag_end_idx + 1],
-                        //});
                         const standalone_end_found = switch (self.lookAheadToNewlineOrEnd(tag_end_idx)) {
                             .newline, .end => true,
                             .non_whitespace => false,
                         };
-                        //std.debug.print("standalone stop at: {?} {?c}\n", .{
-                        //    standalone_end_idx,
-                        //    if (standalone_end_idx) |si| self.input[si] else null,
-                        //});
 
                         if (standalone_end_found) {
                             const start = standalone_range.start;
@@ -138,11 +126,6 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
 
                         self.tag_start = parsed_tag.body[0];
                         self.tag_end = parsed_tag.body[1];
-                        log.info("[delimiter change] after skipping parsed delimiter change: '{s}' '{s}'", .{ parsed_tag.body[0], parsed_tag.body[1] });
-                        log.info("[delimiter change] idx: {} '{s}'", .{
-                            self.idx,
-                            self.input[self.idx..@min(self.idx + 10, self.input.len)],
-                        });
                     }
 
                     const ctoken = DocToken{ .tag = parsed_tag };
@@ -162,7 +145,7 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
     // return final token if necessary
     if (self.token_start < self.input.len) switch (self.state) {
         .tag => {
-            log.err("File ends on a tag, this is invalid behaviour", .{});
+            log.err("File ends on a tag, this is not allowed", .{});
             return error.TagAtEOF;
         },
         .text => {
@@ -189,7 +172,6 @@ fn lookAheadToNewlineOrEnd(self: Tokenizer, start: usize) union(enum) {
 pub const ParseTokenError = ParseDelimsError || ParseVariableError || mem.Allocator.Error;
 
 pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!Token {
-    log.info("[parseToken] input: '{s}'", .{input});
     var trimmed = std.mem.trimRight(u8, input, &std.ascii.whitespace);
 
     assert(trimmed.len > 0);
@@ -205,8 +187,6 @@ pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!T
         trimmed = if (tag == .variable) trimmed else trimmed[1..];
     }
     trimmed = std.mem.trim(u8, trimmed, &std.ascii.whitespace);
-
-    log.info("{s} -> trimmed: '{s}' (from {s})", .{ @tagName(tag), trimmed, input });
 
     const body: []const []const u8 = switch (tag) {
         .delimiter_change => blk: {
@@ -266,7 +246,6 @@ pub fn parseSliceLeaky(
 const ParseDelimsError = error{ EmptyOpeningDelimiter, EmptyClosingDelimiter, UnsupportedDelimiter };
 fn parseDelims(input: []const u8) ParseDelimsError![2][]const u8 {
     assert(input.len > 0);
-    log.debug("Trying to parse delimiters from: '{s}'", .{input});
 
     var state: enum { opening, whitespace } = .opening;
     var opening_end: usize = 0;
@@ -325,14 +304,12 @@ fn testTokenizer(
     input: []const u8,
     expected: []const DocToken,
 ) !void {
-    //std.debug.print("input: ====================\n'{s}'\n====================\n", .{input});
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     var tokenizer = Tokenizer.init(arena.allocator(), input);
     for (expected) |exp_token| {
         const res_token = try tokenizer.nextToken() orelse return error.TooFewTokens;
-        //std.debug.print("token {}: ", .{i});
         res_token.debugPrint();
         try testing.expectEqualDeep(exp_token, res_token);
     }

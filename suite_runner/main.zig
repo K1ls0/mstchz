@@ -59,8 +59,6 @@ const LogState = struct {
 
         if (self.buffering) return;
 
-        //std.debug.print("-....flushing because no explicit buffering:\n'{s}'\n", .{self.buf.items});
-
         try self.out_writer.writeAll(self.buf.items);
         self.buf.clearRetainingCapacity();
     }
@@ -68,8 +66,6 @@ const LogState = struct {
     pub fn flush(self: *LogState) WriteError!void {
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        //std.debug.print("-....flushing because always does: \n'{s}'\n", .{self.buf.items});
 
         try self.out_writer.writeAll(self.buf.items);
         self.buf.clearRetainingCapacity();
@@ -98,8 +94,6 @@ const LogState = struct {
         defer ctx.mutex.unlock();
         std.debug.lockStdErr();
         defer std.debug.unlockStdErr();
-
-        //std.debug.print("==== Got here (bytes.len: {})! '{s}'\n\n", .{ bytes.len, bytes });
 
         return try ctx.buf.writer().write(bytes);
     }
@@ -242,7 +236,6 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
                 },
             };
 
-            log.info("partial include: {any}", .{partials.get("include")});
             var vm = try mstchz.State.init(
                 tmp_alloc,
                 mstchz.Hash{ .inner = data },

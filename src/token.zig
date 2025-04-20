@@ -41,18 +41,12 @@ pub const DocToken = union(DocTokenTag) {
                 .variable, .unescaped_variable => continue,
                 else => {},
             }
-            //const is_partial = tag.type == .partial;
 
             var extract_line_pos = false;
             var prev_target_pos: TRes = .not_standalone;
             var next_target_pos: TRes = .not_standalone;
 
-            //var prev_target_text: ?[]const u8 = null;
-            //// If the following tag is a partial, use this line prefix.
-            //var line_prefix: []const u8 = "";
-            //var next_target_text: ?[]const u8 = null;
             if (i == 0) {
-                //prev_target_text = "";
                 prev_target_pos = .empty;
             } else if (tokens[i - 1] == .text) {
                 switch (scanTokens(tokens, i - 1, .backward)) {
@@ -62,37 +56,15 @@ pub const DocToken = union(DocTokenTag) {
                         extract_line_pos = true;
                     },
                 }
-                //const old_txt = tokens[i - 1].text;
-                //switch (findNewline(old_txt, .backward)) {
-                //    .found => |v| {
-                //        prev_target_text = old_txt[0 .. v + 1];
-                //        line_prefix = old_txt[v + 1 ..];
-                //    },
-                //    .non_whitespace => prev_target_text = null,
-                //    .not_found => {
-                //        // This token is the first one, trim to the start of the file as per spec.
-                //        prev_target_text = if ((i - 1) == 0) "" else null;
-                //        line_prefix = old_txt;
-                //    },
-                //}
             }
 
             if (i == (tokens.len - 1)) {
-                //next_target_text = "";
                 next_target_pos = .empty;
             } else if (tokens[i + 1] == .text) {
                 switch (scanTokens(tokens, i + 1, .forward)) {
                     .found => |p| next_target_pos = .{ .pos = p },
                     .not_found => prev_target_pos = .not_standalone,
                 }
-                //const old_txt - tokens[i + 1].text;
-                //log.info("next trimming: i+1: {} tokens.len - 1: {}", .{ i + 1, tokens.len - 1 });
-                //next_target_text = switch (findNewline(old_txt, .forward)) {
-                //    .found => |v| old_txt[v + 1 ..],
-                //    .non_whitespace => null,
-                //    // This token is the last one, trim to the end of the file as per spec.
-                //    .not_found => if ((i + 1) == (tokens.len - 1)) "" else null,
-                //};
             }
 
             // This tag is a standalone tag
@@ -107,11 +79,6 @@ pub const DocToken = union(DocTokenTag) {
                 .not_standalone => {},
                 .empty => {},
             }
-            //if (prev_target_text) |pttxt| if (next_target_text) |nttxt| {
-            //    tokens[i].tag.standalone_line_prefix = line_prefix;
-            //    if (i != 0) tokens[i - 1].text = pttxt;
-            //    if (i != (tokens.len - 1)) tokens[i + 1].text = nttxt;
-            //};
         }
     }
 };
