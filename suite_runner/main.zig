@@ -4,9 +4,6 @@ const log = std.log;
 const mstchz = @import("mstchz");
 const ansii = @import("ansii.zig");
 
-const new_ckey = "include";
-const new_cval: []const mstchz.token.DocToken = &.{};
-
 pub const std_options = std.Options{
     .log_level = .debug,
     //.logFn = logFn,
@@ -112,15 +109,6 @@ pub fn main() !void {
     var dbg_alloc = std.heap.DebugAllocator(.{ .safety = true }).init;
     defer std.debug.assert(dbg_alloc.deinit() == .ok);
     const alloc = dbg_alloc.allocator();
-
-    {
-        var v = mstchz.PartialMap.init(alloc);
-        defer v.deinit();
-
-        try v.put(new_ckey, new_cval);
-
-        _ = v.get(new_ckey);
-    }
 
     LogState.init(&log_state, alloc);
     defer log_state.deinit();

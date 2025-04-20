@@ -9,7 +9,7 @@ pub const escape = @import("escape.zig");
 pub const Tokenizer = @import("Tokenizer.zig");
 pub const parseSliceLeaky = Tokenizer.parseSliceLeaky;
 
-pub const PartialMap = std.StringHashMap([]const token.DocToken);
+pub const PartialMap = std.StringHashMap([]const token.Token);
 
 pub const Hash = struct {
     inner: std.json.Value,
@@ -136,7 +136,7 @@ pub const Scope = struct {
     }
     pub fn getStartAccessor(
         self: Scope,
-        tokens: []const token.DocToken,
+        tokens: []const token.Token,
     ) ?[]const []const u8 {
         const start = self.start_tag orelse return null;
         assert(start < tokens.len);
@@ -162,7 +162,7 @@ pub const State = struct {
     scopes: Scopes,
 
     partials: *const PartialMap,
-    input: []const token.DocToken,
+    input: []const token.Token,
 
     standalone_line_prefix: ?[]const u8,
 
@@ -173,7 +173,7 @@ pub const State = struct {
         allocator: mem.Allocator,
         ctx: Hash,
         partials: *const PartialMap,
-        input: []const token.DocToken,
+        input: []const token.Token,
         options: InitOptions,
     ) mem.Allocator.Error!State {
         var scopes = try Scopes.init(allocator);
@@ -362,7 +362,7 @@ pub const State = struct {
             }
         }
     }
-    fn isTextAndLaggingNewline(input: []const token.DocToken, prefix: ?[]const u8, i: usize) bool {
+    fn isTextAndLaggingNewline(input: []const token.Token, prefix: ?[]const u8, i: usize) bool {
         return input.len != 0 and
             i == (input.len - 1) and
             prefix != null and

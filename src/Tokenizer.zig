@@ -5,9 +5,9 @@ const assert = std.debug.assert;
 const testing = std.testing;
 
 const token = @import("token.zig");
-const DocToken = token.DocToken;
 const Token = token.Token;
-const TokenTag = token.TokenTag;
+const Tag = token.Tag;
+const TagType = token.TagType;
 
 const Tokenizer = @This();
 
@@ -46,7 +46,7 @@ pub fn init(alloc: mem.Allocator, input: []const u8) Tokenizer {
     };
 }
 
-pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
+pub fn nextToken(self: *Tokenizer) ParseError!?Token {
     assert(self.idx <= self.input.len);
 
     while (self.idx < self.input.len) {
@@ -66,7 +66,7 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
                     self.state = .text;
                     self.idx += 1;
                     self.token_start = next_start;
-                    if (txt.len != 0) return DocToken{ .text = txt };
+                    if (txt.len != 0) return Token{ .text = txt };
                 }
 
                 if (std.mem.startsWith(u8, self.input[self.idx..], self.tag_start)) {
@@ -77,7 +77,7 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
                     self.state = .tag;
                     self.token_start = self.idx;
                     self.idx += self.tag_start.len;
-                    return DocToken{ .text = txt };
+                    return Token{ .text = txt };
                 }
                 if (!std.ascii.isWhitespace(cc) and self.state == .text) {
                     // this is not a whitespace, reset to non-standalone
@@ -128,7 +128,7 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
                         self.tag_end = parsed_tag.body[1];
                     }
 
-                    const ctoken = DocToken{ .tag = parsed_tag };
+                    const ctoken = Token{ .tag = parsed_tag };
                     self.standalone_range = null;
                     self.state = .text;
                     self.idx = tag_end_idx;
@@ -151,7 +151,7 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
         .text => {
             defer self.token_start = self.input.len;
 
-            return DocToken{ .text = self.input[self.token_start..] };
+            return Token{ .text = self.input[self.token_start..] };
         },
     };
     return null;
@@ -171,11 +171,11 @@ fn lookAheadToNewlineOrEnd(self: Tokenizer, start: usize) union(enum) {
 
 pub const ParseTokenError = ParseDelimsError || ParseVariableError || mem.Allocator.Error;
 
-pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!Token {
+pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!Tag {
     var trimmed = std.mem.trimRight(u8, input, &std.ascii.whitespace);
 
     assert(trimmed.len > 0);
-    var tag: TokenTag = .variable;
+    var tag: TagType = .variable;
     if ((trimmed[0] == '{') and (trimmed[trimmed.len - 1] == '}')) {
         tag = .unescaped_variable;
         trimmed = trimmed[1..(trimmed.len - 1)];
@@ -183,7 +183,7 @@ pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!T
         tag = .delimiter_change;
         trimmed = trimmed[1..(trimmed.len - 1)];
     } else {
-        tag = TokenTag.fromSpecifier(input[0]);
+        tag = TagType.fromSpecifier(input[0]);
         trimmed = if (tag == .variable) trimmed else trimmed[1..];
     }
     trimmed = std.mem.trim(u8, trimmed, &std.ascii.whitespace);
@@ -199,13 +199,13 @@ pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!T
         else => try parseVariable(tmp_alloc, trimmed),
     };
 
-    return Token{
+    return Tag{
         .type = tag,
         .body = body,
     };
 }
 
-fn trimStandaloneTokens(tokens: []DocToken) void {
+fn trimStandaloneTokens(tokens: []Token) void {
     for (tokens, 0..) |*ctoken, i| {
         if (ctoken.* != .tag or ctoken.tag.standalone_line_prefix == null) continue;
         switch (ctoken.tag.type) {
@@ -230,8 +230,8 @@ pub const ParseError = error{TagAtEOF} || ParseTokenError || mem.Allocator.Error
 pub fn parseSliceLeaky(
     alloc: mem.Allocator,
     input: []const u8,
-) ParseError![]const DocToken {
-    var list = std.ArrayList(DocToken).init(alloc);
+) ParseError![]const Token {
+    var list = std.ArrayList(Token).init(alloc);
     defer list.deinit();
     var state = Tokenizer.init(alloc, input);
     while (try state.nextToken()) |ctoken| {
@@ -302,7 +302,7 @@ fn parseVariable(alloc: mem.Allocator, input: []const u8) ParseVariableError![]c
 
 fn testTokenizer(
     input: []const u8,
-    expected: []const DocToken,
+    expected: []const Token,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -324,15 +324,15 @@ test "Tokenizer.simple_middle" {
         \\  ldskfslfd
         \\
     , &.{
-        DocToken{ .text = "this\n" },
-        DocToken{ .text = "  " },
-        DocToken{ .tag = Token{
+        Token{ .text = "this\n" },
+        Token{ .text = "  " },
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = "  ",
         } },
-        DocToken{ .text = "  \n" },
-        DocToken{ .text = "  ldskfslfd\n" },
+        Token{ .text = "  \n" },
+        Token{ .text = "  ldskfslfd\n" },
     });
 }
 
@@ -342,14 +342,14 @@ test "Tokenizer.simple_start" {
         \\  ldskfslfd
         \\
     , &.{
-        DocToken{ .text = "  " },
-        DocToken{ .tag = Token{
+        Token{ .text = "  " },
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = "  ",
         } },
-        DocToken{ .text = "  \n" },
-        DocToken{ .text = "  ldskfslfd\n" },
+        Token{ .text = "  \n" },
+        Token{ .text = "  ldskfslfd\n" },
     });
 }
 
@@ -358,14 +358,14 @@ test "Tokenizer.simple_end" {
         \\this
         \\  {{>partial}}  
     , &.{
-        DocToken{ .text = "this\n" },
-        DocToken{ .text = "  " },
-        DocToken{ .tag = Token{
+        Token{ .text = "this\n" },
+        Token{ .text = "  " },
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = "  ",
         } },
-        DocToken{ .text = "  " },
+        Token{ .text = "  " },
     });
 }
 
@@ -374,13 +374,13 @@ test "Tokenizer.first_all" {
         \\{{>partial}} 
         \\  ldskfslfd
     , &.{
-        DocToken{ .tag = Token{
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = "",
         } },
-        DocToken{ .text = " \n" },
-        DocToken{ .text = "  ldskfslfd" },
+        Token{ .text = " \n" },
+        Token{ .text = "  ldskfslfd" },
     });
 }
 
@@ -389,9 +389,9 @@ test "Tokenizer.end_all" {
         \\  ldskfslfd
         \\ {{>partial}}
     , &.{
-        DocToken{ .text = "  ldskfslfd\n" },
-        DocToken{ .text = " " },
-        DocToken{ .tag = Token{
+        Token{ .text = "  ldskfslfd\n" },
+        Token{ .text = " " },
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = " ",
@@ -405,14 +405,14 @@ test "Tokenizer.end_all_newline" {
         \\ {{>partial}}
         \\
     , &.{
-        DocToken{ .text = "  ldskfslfd\n" },
-        DocToken{ .text = " " },
-        DocToken{ .tag = Token{
+        Token{ .text = "  ldskfslfd\n" },
+        Token{ .text = " " },
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = " ",
         } },
-        DocToken{ .text = "\n" },
+        Token{ .text = "\n" },
     });
 }
 
@@ -422,13 +422,13 @@ test "Tokenizer.standalone_only_at_line" {
         \\{{>partial}}
         \\
     , &.{
-        DocToken{ .text = "  ldskfslfd\n" },
-        DocToken{ .tag = Token{
+        Token{ .text = "  ldskfslfd\n" },
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = "",
         } },
-        DocToken{ .text = "\n" },
+        Token{ .text = "\n" },
     });
 }
 
@@ -437,8 +437,8 @@ test "Tokenizer.standalone_only_without_endline" {
         \\  ldskfslfd
         \\{{>partial}}
     , &.{
-        DocToken{ .text = "  ldskfslfd\n" },
-        DocToken{ .tag = Token{
+        Token{ .text = "  ldskfslfd\n" },
+        Token{ .tag = Tag{
             .type = .partial,
             .body = &.{"partial"},
             .standalone_line_prefix = "",
@@ -450,26 +450,26 @@ test "Tokenizer.tripple_unescaped_name" {
     try testTokenizer(
         \\"{{{person.name}}}" == "{{#person}}{{{name}}}{{/person}}"
     , &.{
-        DocToken{ .text = "\"" },
-        DocToken{ .tag = Token{
+        Token{ .text = "\"" },
+        Token{ .tag = Tag{
             .type = .unescaped_variable,
             .body = &.{ "person", "name" },
             .standalone_line_prefix = null,
         } },
-        DocToken{ .text = "\" == \"" },
-        DocToken{ .tag = Token{
+        Token{ .text = "\" == \"" },
+        Token{ .tag = Tag{
             .type = .section_open,
             .body = &.{"person"},
         } },
-        DocToken{ .tag = Token{
+        Token{ .tag = Tag{
             .type = .unescaped_variable,
             .body = &.{"name"},
             .standalone_line_prefix = null,
         } },
-        DocToken{ .tag = Token{
+        Token{ .tag = Tag{
             .type = .section_close,
             .body = &.{"person"},
         } },
-        DocToken{ .text = "\"" },
+        Token{ .text = "\"" },
     });
 }
