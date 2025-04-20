@@ -165,6 +165,7 @@ pub fn main() !void {
     log.info("Testcases: {}", .{all_testcases});
     log.info("Sucesses: {}", .{all_testcases - all_fails});
     log.info("Fails: {}", .{all_fails});
+    log.info("=> {s}", .{if (all_fails == 0) success_str else fail_str});
     log.info("===============================", .{});
 }
 const TestFileResults = struct {
@@ -242,7 +243,7 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
             };
 
             log.info("partial include: {any}", .{partials.get("include")});
-            var vm = mstchz.State.init(
+            var vm = try mstchz.State.init(
                 tmp_alloc,
                 mstchz.Hash{ .inner = data },
                 &partials,

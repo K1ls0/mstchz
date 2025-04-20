@@ -87,7 +87,6 @@ pub fn nextToken(self: *Tokenizer) ParseError!?DocToken {
                 }
             },
             .tag => {
-                log.info("[tag][{}][{c}] brace depth: {}", .{ self.idx, self.input[self.idx], self.brace_depth });
                 switch (cc) {
                     '{' => {
                         self.brace_depth += 1;

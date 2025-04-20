@@ -156,9 +156,11 @@ fn accessorsEql(self: []const []const u8, other: []const []const u8) bool {
 }
 
 pub const State = struct {
+    allocator: mem.Allocator,
     exec_arena: std.heap.ArenaAllocator,
 
-    hash: Hash,
+    scopes: Scopes,
+
     partials: *const PartialMap,
     input: []const token.DocToken,
 
@@ -173,19 +175,25 @@ pub const State = struct {
         partials: *const PartialMap,
         input: []const token.DocToken,
         options: InitOptions,
-    ) State {
+    ) mem.Allocator.Error!State {
+        var scopes = try Scopes.init(allocator);
+        try scopes.push(Scope{
+            .start_tag = null,
+            .state = .{ .block = .{ .hash = ctx, .block_state = .run } },
+        }, &.{});
         return State{
+            .allocator = allocator,
             .exec_arena = .init(allocator),
-            .hash = ctx,
             .partials = partials,
             .input = input,
             .standalone_line_prefix = options.line_prefix,
+            .scopes = scopes,
         };
     }
 
     pub fn deinit(self: *State) void {
+        self.scopes.deinit();
         self.exec_arena.deinit();
-        //self.partials.deinit();
     }
 
     pub const RenderError = error{
@@ -198,23 +206,8 @@ pub const State = struct {
         EncodingError,
     } || Hash.GetError || Hash.IterError;
 
-    pub fn render(self: *State, w: anytype) (RenderError || mem.Allocator.Error || @TypeOf(w).Error)!void {
-        var scopes = try Scopes.init(self.exec_arena.allocator());
-        defer scopes.deinit();
-
-        if (self.standalone_line_prefix) |prefix| try w.writeAll(prefix);
-
-        const writer = w;
-        //var inserting_writer = insertingWriter(w, .{
-        //    .marker = '\n',
-        //    .to_insert = self.standalone_line_prefix orelse "",
-        //});
-        //const writer = inserting_writer.writer();
-
-        try scopes.push(Scope{
-            .start_tag = null,
-            .state = .{ .block = .{ .hash = self.hash, .block_state = .run } },
-        }, &.{});
+    pub fn render(self: *State, writer: anytype) (RenderError || mem.Allocator.Error || @TypeOf(writer).Error)!void {
+        if (self.standalone_line_prefix) |prefix| try writer.writeAll(prefix);
 
         var token_idx: usize = 0;
 
@@ -224,7 +217,7 @@ pub const State = struct {
                 .text => |t| t,
                 .tag => |t| @tagName(t.type),
             }) });
-            if (scopes.currentScope().blockState() == .skip) {
+            if (self.scopes.currentScope().blockState() == .skip) {
                 log.info("In skipping mode:", .{});
                 switch (ctoken) {
                     .text => log.info("\tText", .{}),
@@ -234,22 +227,22 @@ pub const State = struct {
 
             switch (ctoken) {
                 .text => |txt| {
-                    if (scopes.currentScope().blockState() == .skip) continue;
+                    if (self.scopes.currentScope().blockState() == .skip) continue;
 
                     var start: usize = 0;
                     if (self.standalone_line_prefix) |line_prefix| {
                         for (txt, 0..) |cc, i| {
                             if (cc == '\n') {
                                 try writer.writeAll(txt[start .. i + 1]);
-                                {
+                                const emit_prefix = blk: {
                                     // Strip last newline of this render because apparently it is not
                                     // permitted to insert the indentation to a lagging newline.
                                     const last_token = token_idx == self.input.len - 1;
                                     const is_partial = self.standalone_line_prefix != null;
                                     const current_is_lagging = i == txt.len - 1;
-                                    if (last_token and is_partial and current_is_lagging) continue;
-                                }
-                                try writer.writeAll(line_prefix);
+                                    break :blk !(last_token and is_partial and current_is_lagging);
+                                };
+                                if (emit_prefix) try writer.writeAll(line_prefix);
                                 start = i + 1;
                             }
                         }
@@ -260,11 +253,11 @@ pub const State = struct {
                     .comment => assert(t.body.len == 1),
                     .delimiter_change => assert(t.body.len == 2),
                     .variable, .unescaped_variable => |any_variable| {
-                        scopes.printCurrentLookup();
+                        self.scopes.printCurrentLookup();
 
-                        const sub_hash = scopes.lookup(t.body) orelse continue;
+                        const sub_hash = self.scopes.lookup(t.body) orelse continue;
 
-                        if (scopes.currentScope().blockState() == .skip) continue;
+                        if (self.scopes.currentScope().blockState() == .skip) continue;
                         switch (any_variable) {
                             .variable => {
                                 var encoding_writer = runtime.escapingWriter(writer);
@@ -276,11 +269,11 @@ pub const State = struct {
                         }
                     },
                     .section_open => {
-                        const current_is_skip = scopes.currentScope().blockState() == .skip;
+                        const current_is_skip = self.scopes.currentScope().blockState() == .skip;
 
-                        const sub_hash: ?Hash = scopes.lookup(t.body) orelse null;
+                        const sub_hash: ?Hash = self.scopes.lookup(t.body) orelse null;
                         log.info("[section open] current hash global lookup:", .{});
-                        scopes.printCurrentLookup();
+                        self.scopes.printCurrentLookup();
 
                         const new_scope = if (sub_hash) |ch| blk: {
                             // We are skipping already, but still need to keep track of tags,
@@ -319,12 +312,12 @@ pub const State = struct {
                             .start_tag = token_idx,
                         };
 
-                        try scopes.push(new_scope, t.body);
+                        try self.scopes.push(new_scope, t.body);
                     },
                     .inverted_section_open => {
-                        const current_is_skip = scopes.currentScope().blockState() == .skip;
+                        const current_is_skip = self.scopes.currentScope().blockState() == .skip;
 
-                        const run_section = if (scopes.lookup(t.body)) |ch| blk: {
+                        const run_section = if (self.scopes.lookup(t.body)) |ch| blk: {
                             log.info("got hash", .{});
                             {
                                 const as_str = std.json.stringifyAlloc(
@@ -341,7 +334,7 @@ pub const State = struct {
                         };
                         log.info("[inverted] run_section: {any} is_skip: {}", .{ run_section, current_is_skip });
 
-                        try scopes.push(Scope{
+                        try self.scopes.push(Scope{
                             .state = .{ .block = .{
                                 .hash = null,
                                 .block_state = if (current_is_skip)
@@ -352,7 +345,7 @@ pub const State = struct {
                         }, t.body);
                     },
                     .section_close => {
-                        const cscope = scopes.currentScope();
+                        const cscope = self.scopes.currentScope();
                         const start_accessor = cscope.getStartAccessor(self.input) orelse unreachable;
                         if (!accessorsEql(start_accessor, t.body)) {
                             log.err("Block not closed", .{});
@@ -360,16 +353,16 @@ pub const State = struct {
                         }
 
                         log.info("[section close] current lookup", .{});
-                        scopes.printCurrentLookup();
+                        self.scopes.printCurrentLookup();
 
                         switch (cscope.state) {
-                            .block => |_| _ = scopes.pop(t.body),
+                            .block => |_| _ = self.scopes.pop(t.body),
                             .iter => |*it| {
                                 _ = it.next();
                                 if (it.peek()) |_| {
                                     token_idx = cscope.start_tag.?;
                                 } else {
-                                    _ = scopes.pop(t.body);
+                                    _ = self.scopes.pop(t.body);
                                 }
                             },
                         }
@@ -377,20 +370,20 @@ pub const State = struct {
                     .partial => {
                         log.info("standalone ? {}", .{t.standalone_line_prefix != null});
                         assert(t.body.len == 1);
-                        if (scopes.currentScope().blockState() == .skip) continue;
+                        if (self.scopes.currentScope().blockState() == .skip) continue;
 
                         const partial_name = t.body[0];
-                        const chash = scopes.currentHash();
+                        const chash = self.scopes.currentHash();
                         if (self.partials.*.get(partial_name)) |partial| {
-                            var state = State.init(
-                                self.exec_arena.allocator(),
+                            var state = try State.init(
+                                self.allocator,
                                 chash,
                                 self.partials,
                                 partial,
                                 .{ .line_prefix = t.standalone_line_prefix },
                             );
                             defer state.deinit();
-                            try state.render(w);
+                            try state.render(writer);
 
                             for (partial) |p| {
                                 switch (p) {
