@@ -4,114 +4,11 @@ const mem = std.mem;
 const log = std.log.scoped(.mustachez);
 const assert = std.debug.assert;
 
-const default_tag_start = "{{";
-const default_tag_end = "}}";
-
-pub const Tokenizer = struct {
-    pub const State = enum {
-        text,
-        tag,
-    };
-    input: []const u8,
-    alloc: mem.Allocator,
-    tag_start: []const u8,
-    tag_end: []const u8,
-
-    state: State,
-    token_start: usize,
-    prev_newline: usize,
-    brace_depth: usize,
-
-    idx: usize,
-
-    pub fn init(alloc: mem.Allocator, input: []const u8) Tokenizer {
-        return .{
-            .input = input,
-            .alloc = alloc,
-            .tag_start = default_tag_start,
-            .tag_end = default_tag_end,
-            .state = .text,
-            .token_start = 0,
-            .prev_newline = 0,
-            .brace_depth = 0,
-            .idx = 0,
-        };
-    }
-
-    pub fn nextToken(self: *Tokenizer) DocToken.ParseError!?DocToken {
-        assert(self.idx <= self.input.len);
-
-        while (self.idx < self.input.len) {
-            assert(self.tag_start.len != 0);
-            assert(self.tag_end.len != 0);
-            assert(self.idx >= self.token_start);
-
-            const cc = self.input[self.idx];
-            switch (self.state) {
-                .text => {
-                    if (std.mem.startsWith(u8, self.input[self.idx..], self.tag_start)) {
-                        const text = self.input[self.token_start..self.idx];
-
-                        defer {
-                            self.state = .tag;
-                            self.idx += self.tag_start.len;
-                            self.token_start = self.idx;
-                        }
-                        return DocToken{ .text = text };
-                    }
-                },
-                .tag => {
-                    const outside_braces = self.brace_depth == 0;
-                    switch (cc) {
-                        '{' => self.brace_depth += 1,
-                        '}' => {
-                            if (self.brace_depth != 0) self.brace_depth -= 1;
-                        },
-                        else => {},
-                    }
-
-                    if (std.mem.startsWith(u8, self.input[self.idx..], self.tag_end) and outside_braces) {
-                        const tag_txt = self.input[self.token_start..self.idx];
-                        const parsed_tag = try parseToken(self.alloc, tag_txt);
-                        const old_tag_end_len = self.tag_end.len;
-
-                        switch (parsed_tag.type) {
-                            .delimiter_change => {
-                                assert(parsed_tag.body.len == 2);
-                                self.tag_start = parsed_tag.body[0];
-                                self.tag_end = parsed_tag.body[1];
-                            },
-                            else => {},
-                        }
-
-                        defer {
-                            self.state = .text;
-                            self.idx += old_tag_end_len;
-                            self.token_start = self.idx;
-                        }
-                        return DocToken{ .tag = parsed_tag };
-                    }
-                },
-            }
-            self.idx += 1;
-        }
-
-        assert(self.idx <= self.input.len);
-
-        // return final token if necessary
-        if (self.token_start < self.input.len) switch (self.state) {
-            .tag => {
-                log.err("File ends on a tag, this is invalid behaviour", .{});
-                return error.TagAtEOF;
-            },
-            .text => {
-                defer self.token_start = self.input.len;
-
-                return DocToken{ .text = self.input[self.token_start..] };
-            },
-        };
-        return null;
-    }
+const TPos = struct { token: usize, position: usize };
+const TRes = union(enum) {
+    not_standalone,
+    empty,
+    pos: TPos,
 };
 
 pub const DocTokenTag = enum { text, tag };
@@ -119,24 +16,23 @@ pub const DocToken = union(DocTokenTag) {
     text: []const u8,
     tag: Token,
 
-    pub const ParseError = error{TagAtEOF} || ParseTokenError || mem.Allocator.Error;
-    pub fn parseSliceLeaky(
-        alloc: mem.Allocator,
-        input: []const u8,
-    ) ParseError![]const DocToken {
-        var list = std.ArrayList(DocToken).init(alloc);
-        defer list.deinit();
-        var state = Tokenizer.init(alloc, input);
-        while (try state.nextToken()) |token| {
-            try list.append(token);
+    pub fn debugPrint(self: DocToken) void {
+        switch (self) {
+            .text => |txt| {
+                std.debug.print("TEXT: {} '{s}'\n", .{ txt.len, txt });
+            },
+            .tag => |t| {
+                std.debug.print("TAG: '{s}' (standalone prefix: '{?s}') body: ", .{ @tagName(t.type), t.standalone_line_prefix });
+                for (t.body, 0..) |p, i| {
+                    if (i != 0) std.debug.print(":", .{});
+                    std.debug.print("'{s}'", .{p});
+                }
+                std.debug.print("\n", .{});
+            },
         }
-
-        trimStandaloneTokens(list.items);
-
-        return try list.toOwnedSlice();
     }
 
-    fn trimStandaloneTokens(tokens: []DocToken) void {
+    fn trimStandaloneTokensAndPopulatePrefix(allocator: mem.Allocator, tokens: []DocToken) void {
         for (0..tokens.len) |ti| {
             const i = tokens.len - 1 - ti;
             if (tokens[i] == .text) continue;
@@ -145,64 +41,323 @@ pub const DocToken = union(DocTokenTag) {
                 .variable, .unescaped_variable => continue,
                 else => {},
             }
+            //const is_partial = tag.type == .partial;
 
-            var prev_target_text: ?[]const u8 = null;
-            var next_target_text: ?[]const u8 = null;
-            if ((i == 0)) {
-                prev_target_text = "";
+            var extract_line_pos = false;
+            var prev_target_pos: TRes = .not_standalone;
+            var next_target_pos: TRes = .not_standalone;
+
+            //var prev_target_text: ?[]const u8 = null;
+            //// If the following tag is a partial, use this line prefix.
+            //var line_prefix: []const u8 = "";
+            //var next_target_text: ?[]const u8 = null;
+            if (i == 0) {
+                //prev_target_text = "";
+                prev_target_pos = .empty;
             } else if (tokens[i - 1] == .text) {
-                const old_txt = tokens[i - 1].text;
-                prev_target_text = switch (findNewline(old_txt, .backward)) {
-                    .found => |v| old_txt[0 .. v + 1],
-                    .non_whitespace => null,
-                    // This token is the first one, trim to the start of the file as per spec.
-                    .not_found => if ((i - 1) == 0) "" else null,
-                };
+                switch (scanTokens(tokens, i - 1, .backward)) {
+                    .found => |p| prev_target_pos = p,
+                    .not_found => {
+                        prev_target_pos = .not_standalone;
+                        extract_line_pos = true;
+                    },
+                }
+                //const old_txt = tokens[i - 1].text;
+                //switch (findNewline(old_txt, .backward)) {
+                //    .found => |v| {
+                //        prev_target_text = old_txt[0 .. v + 1];
+                //        line_prefix = old_txt[v + 1 ..];
+                //    },
+                //    .non_whitespace => prev_target_text = null,
+                //    .not_found => {
+                //        // This token is the first one, trim to the start of the file as per spec.
+                //        prev_target_text = if ((i - 1) == 0) "" else null;
+                //        line_prefix = old_txt;
+                //    },
+                //}
             }
 
             if (i == (tokens.len - 1)) {
-                next_target_text = "";
+                //next_target_text = "";
+                next_target_pos = .empty;
             } else if (tokens[i + 1] == .text) {
-                const old_txt = tokens[i + 1].text;
-                log.info("next trimming: i+1: {} tokens.len - 1: {}", .{ i + 1, tokens.len - 1 });
-                next_target_text = switch (findNewline(old_txt, .forward)) {
-                    .found => |v| old_txt[v + 1 ..],
-                    .non_whitespace => null,
-                    // This token is the last one, trim to the end of the file as per spec.
-                    .not_found => if ((i + 1) == (tokens.len - 1)) "" else null,
-                };
+                switch (scanTokens(tokens, i + 1, .forward)) {
+                    .found => |p| next_target_pos = .{ .pos = p },
+                    .not_found => prev_target_pos = .not_standalone,
+                }
+                //const old_txt - tokens[i + 1].text;
+                //log.info("next trimming: i+1: {} tokens.len - 1: {}", .{ i + 1, tokens.len - 1 });
+                //next_target_text = switch (findNewline(old_txt, .forward)) {
+                //    .found => |v| old_txt[v + 1 ..],
+                //    .non_whitespace => null,
+                //    // This token is the last one, trim to the end of the file as per spec.
+                //    .not_found => if ((i + 1) == (tokens.len - 1)) "" else null,
+                //};
             }
 
-            //if ((i != (tokens.len - 1)) and tokens[i + 1] == .text) {} else if (i == (tokens.len - 1)) {}
-
-            if (prev_target_text) |pttxt| if (next_target_text) |nttxt| {
-                if (i != 0) tokens[i - 1].text = pttxt;
-                if (i != (tokens.len - 1)) tokens[i + 1].text = nttxt;
-            };
-        }
-    }
-
-    const NewlineRes = union(enum) {
-        not_found,
-        non_whitespace,
-        found: usize,
-    };
-    fn findNewline(txt: []const u8, comptime direction: enum { forward, backward }) NewlineRes {
-        for (0..txt.len) |i| {
-            const idx: usize = switch (direction) {
-                inline .forward => i,
-                inline .backward => txt.len - 1 - i,
-            };
-            switch (txt[idx]) {
-                '\n' => return .{ .found = idx },
-                else => {
-                    if (!std.ascii.isWhitespace(txt[idx])) return .non_whitespace;
-                },
+            // This tag is a standalone tag
+            if (prev_target_pos != .not_standalone and next_target_pos != .not_standalone) {
+                var buf = std.ArrayList(u8).init(allocator);
+                defer buf.deinit();
+                if (prev_target_pos == .pos) {
+                    trimTokens();
+                }
             }
+            switch (prev_target_pos) {
+                .not_standalone => {},
+                .empty => {},
+            }
+            //if (prev_target_text) |pttxt| if (next_target_text) |nttxt| {
+            //    tokens[i].tag.standalone_line_prefix = line_prefix;
+            //    if (i != 0) tokens[i - 1].text = pttxt;
+            //    if (i != (tokens.len - 1)) tokens[i + 1].text = nttxt;
+            //};
         }
-        return .not_found;
     }
 };
+
+const Direction = enum { forward, backward };
+const TokenScanResult = union(enum) {
+    not_found,
+    found: TPos,
+};
+
+fn scanTokens(
+    tokens: []const DocToken,
+    start: usize,
+    comptime direction: Direction,
+) TokenScanResult {
+    const C = struct {
+        fn scanTokensForwards(
+            tokens_inner: []const DocToken,
+            start_inner: usize,
+        ) TokenScanResult {
+            for (start_inner..tokens_inner.len) |i| {
+                switch (tokens_inner[i]) {
+                    .text => |txt| switch (findNewline(txt, .forward)) {
+                        .found => |pos| return .{ .found = .{ .token = i, .position = pos } },
+                        .non_whitespace => return .not_found,
+                        .not_found => {},
+                    },
+                    .tag => return .not_found,
+                }
+            }
+            return .not_found;
+        }
+
+        fn scanTokensBackwards(
+            tokens_inner: []const DocToken,
+            start_inner: usize,
+        ) TokenScanResult {
+            for (0..start_inner + 1) |u| {
+                const i = start_inner - u;
+                switch (tokens_inner[i]) {
+                    .text => |txt| switch (findNewline(txt, .forward)) {
+                        .found => |pos| return .{ .found = .{ .token = i, .position = pos } },
+                        .non_whitespace => return .not_found,
+                        .not_found => {},
+                    },
+                    .tag => return .not_found,
+                }
+            }
+            return .not_found;
+        }
+    };
+
+    return switch (direction) {
+        inline .forward => C.scanTokensForwards(tokens, start),
+        inline .backward => C.scanTokensBackwards(tokens, start),
+    };
+}
+
+//test "scanTokens.backward" {
+//    const tokens = .{
+//        DocToken{
+//            .text = "\n ",
+//        },
+//        DocToken{
+//            .text = "   ",
+//        },
+//        DocToken{
+//            .tag = Token{
+//                .type = .comment,
+//                .body = &.{"This is some test!"},
+//                .standalone_line_prefix = null,
+//            },
+//        },
+//        DocToken{
+//            .text = " \t ",
+//        },
+//        DocToken{
+//            .text = " \t ",
+//        },
+//    };
+//
+//    try testing.expectEqualDeep(
+//        TokenScanResult{ .found = .{ .token = 0, .position = 0 } },
+//        scanTokens(&tokens, 1, .backward),
+//    );
+//}
+//
+//test "scanTokens.forward.positive" {
+//    const tokens = .{
+//        DocToken{
+//            .text = " \n  ",
+//        },
+//        DocToken{
+//            .tag = Token{
+//                .type = .comment,
+//                .body = &.{"This is some test!"},
+//                .standalone_line_prefix = null,
+//            },
+//        },
+//        DocToken{
+//            .text = "  ",
+//        },
+//        DocToken{
+//            .text = "  \n  ",
+//        },
+//    };
+//
+//    try testing.expectEqualDeep(
+//        TokenScanResult{ .found = .{ .token = 3, .position = 2 } },
+//        scanTokens(&tokens, 2, .forward),
+//    );
+//
+//    try testing.expectEqualDeep(
+//        TokenScanResult{ .found = .{ .token = 0, .position = 1 } },
+//        scanTokens(&tokens, 0, .forward),
+//    );
+//}
+//
+//test "scanTokens.forward.negative" {
+//    const tokens = .{
+//        DocToken{
+//            .text = "   ",
+//        },
+//        DocToken{
+//            .tag = Token{
+//                .type = .comment,
+//                .body = &.{"This is some test!"},
+//                .standalone_line_prefix = null,
+//            },
+//        },
+//        DocToken{
+//            .text = "  ",
+//        },
+//        DocToken{
+//            .text = "    ",
+//        },
+//    };
+//
+//    try testing.expectEqualDeep(
+//        TokenScanResult.non_whitespace,
+//        scanTokens(&tokens, 2, .forward),
+//    );
+//
+//    try testing.expectEqualDeep(
+//        TokenScanResult.non_whitespace,
+//        scanTokens(&tokens, 0, .forward),
+//    );
+//}
+
+fn findNewline(
+    txt: []const u8,
+    comptime direction: Direction,
+) union(enum) {
+    not_found,
+    non_whitespace,
+    found: usize,
+} {
+    for (0..txt.len) |i| {
+        const idx: usize = switch (direction) {
+            inline .forward => i,
+            inline .backward => txt.len - 1 - i,
+        };
+        switch (txt[idx]) {
+            '\n' => return .{ .found = idx },
+            else => {
+                if (!std.ascii.isWhitespace(txt[idx])) return .non_whitespace;
+            },
+        }
+    }
+    return .not_found;
+}
+
+fn TrimTokensError(comptime W: type) type {
+    return if (@TypeOf(W) == void) error{} else @TypeOf(W).Error;
+}
+// if writer is passed as void ({}) nothing will be written (extracted)
+fn trimTokens(
+    tokens: []DocToken,
+    start: usize,
+    start_i: usize,
+    end: usize,
+    end_i: usize,
+    writer: anytype,
+) TrimTokensError(@TypeOf(writer))!void {
+    assert(start < tokens.len);
+    assert(end < tokens.len);
+    assert(start <= end);
+
+    const writer_is_active = @TypeOf(writer) == void;
+
+    if (start == end) {
+        assert(start_i == 0 or end_i == (tokens[start].text.len - 1));
+        const txt = tokens[start].text[start_i .. end_i + 1];
+        tokens[start].text = if (start_i == 0)
+            tokens[start].text[end_i..]
+        else if (end_i == (tokens[start].text.len - 1))
+            tokens[start].text[0..start_i]
+        else
+            unreachable;
+        return txt;
+    }
+
+    //var buf = if (comptime writer_is_active)
+    //    try std.ArrayList(u8).initCapacity(allocator, 32)
+    //else {};
+    //defer buf.deinit();
+
+    {
+        const first = &tokens[start];
+        assert(first.* == .text);
+        if (comptime writer_is_active) try writer.writeAll(first.text[start_i..]);
+        first.*.text = first.text[0..start_i];
+    }
+
+    for (start + 1..end) |i| {
+        assert(tokens[i] == .text);
+        if (comptime writer_is_active) try writer.writeAll(tokens[i].text);
+        tokens[i].text = "";
+    }
+    {
+        const last = &tokens[end];
+        assert(last.* == .text);
+        if (comptime writer_is_active) try writer.writeAll(last.text[0..(end_i + 1)]);
+        last.*.text = last.text[(end_i + 1)..];
+    }
+}
+
+//test "trimAndExtract" {
+//    var tokens = [_]DocToken{
+//        DocToken{ .text = "|   " },
+//        DocToken{ .text = "   " },
+//        DocToken{ .text = "  " },
+//    };
+//    {
+//        var out_buf = std.ArrayList(testing.allocator).init();
+//        defer out_buf.deinit();
+//        try trimTokens(&tokens, 0, 1, 2, 0, out_buf.writer());
+//
+//        try testing.expectEqualStrings("       ", out_buf.items);
+//        try testing.expectEqualDeep([_]DocToken{
+//            DocToken{ .text = "|" },
+//            DocToken{ .text = "" },
+//            DocToken{ .text = " " },
+//        }, tokens);
+//    }
+//}
 
 pub const TokenTag = enum {
     variable,
@@ -230,106 +385,5 @@ pub const TokenTag = enum {
 pub const Token = struct {
     type: TokenTag,
     body: []const []const u8,
+    standalone_line_prefix: ?[]const u8 = null,
 };
-
-pub const ParseTokenError = ParseDelimsError || ParseVariableError || mem.Allocator.Error;
-
-pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!Token {
-    var trimmed = std.mem.trimRight(u8, input, &std.ascii.whitespace);
-    //defer {
-    //    std.debug.print("||parse token out: '{s}'||", .{trimmed});
-    //}
-    assert(trimmed.len > 0);
-    var tag: TokenTag = .variable;
-    if ((trimmed[0] == '{') and (trimmed[trimmed.len - 1] == '}')) {
-        tag = .unescaped_variable;
-        trimmed = trimmed[1..(trimmed.len - 1)];
-    } else if ((trimmed[0] == '=') and (trimmed[trimmed.len - 1] == '=')) {
-        tag = .delimiter_change;
-        trimmed = trimmed[1..(trimmed.len - 1)];
-    } else {
-        tag = TokenTag.fromSpecifier(input[0]);
-        trimmed = if (tag == .variable) trimmed else trimmed[1..];
-    }
-    trimmed = std.mem.trim(u8, trimmed, &std.ascii.whitespace);
-
-    log.info("{s} -> trimmed: '{s}' (from {s})", .{ @tagName(tag), trimmed, input });
-
-    const body: []const []const u8 = switch (tag) {
-        .delimiter_change => blk: {
-            break :blk try tmp_alloc.dupe(
-                []const u8,
-                &try parseDelims(trimmed),
-            );
-        },
-        .comment => try tmp_alloc.dupe([]const u8, &.{trimmed}),
-        else => try parseVariable(tmp_alloc, trimmed),
-    };
-
-    return Token{
-        .type = tag,
-        .body = body,
-    };
-}
-
-const ParseDelimsError = error{ EmptyOpeningDelimiter, EmptyClosingDelimiter };
-fn parseDelims(input: []const u8) ParseDelimsError![2][]const u8 {
-    assert(input.len > 0);
-    log.debug("Trying to parse delimiters from: '{s}'", .{input});
-
-    var state: enum { opening, whitespace } = .opening;
-    var opening_end: usize = 0;
-    var closing_start: usize = input.len - 1;
-    loop_blk: for (input, 0..) |cc, i| {
-        switch (state) {
-            .opening => {
-                if (std.ascii.isWhitespace(cc)) {
-                    if (i == 0) return error.EmptyOpeningDelimiter;
-                    opening_end = i;
-                    state = .whitespace;
-                }
-            },
-            .whitespace => {
-                if (!std.ascii.isWhitespace(cc)) {
-                    closing_start = i;
-                    break :loop_blk;
-                }
-            },
-        }
-    }
-    if (closing_start == (input.len)) return error.EmptyClosingDelimiter;
-
-    return .{ input[0..opening_end], input[closing_start..] };
-}
-
-const ParseVariableError = error{ WhitespaceInVariable, ZeroLenVariable } || mem.Allocator.Error;
-
-fn parseVariable(alloc: mem.Allocator, input: []const u8) ParseVariableError![]const []const u8 {
-    var list = std.ArrayListUnmanaged([]const u8).empty;
-
-    if (input.len == 1 and input[0] == '.') return &.{}; // Special case: current
-
-    var cstart: usize = 0;
-    for (input, 0..) |cc, i| {
-        switch (cc) {
-            '.' => {
-                const var_name = input[cstart..i];
-                if (var_name.len == 0) return error.ZeroLenVariable;
-                try list.append(alloc, var_name);
-                cstart = i + 1;
-            },
-            else => {
-                if (std.ascii.isWhitespace(cc)) return error.WhitespaceInVariable;
-            },
-        }
-    }
-    {
-        const var_name = input[cstart..input.len];
-        if (var_name.len == 0) return error.ZeroLenVariable;
-        try list.append(alloc, var_name);
-    }
-    return try list.toOwnedSlice(alloc);
-}
-test "Token.parse.simple" {
-    //parseToken();
-}

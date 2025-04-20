@@ -211,7 +211,7 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
         {
             var it = partials_json.iterator();
             while (it.next()) |item| {
-                const parsed = try mstchz.token.DocToken.parseSliceLeaky(tmp_alloc, item.value_ptr.string);
+                const parsed = try mstchz.parseSliceLeaky(tmp_alloc, item.value_ptr.string);
                 try partials.put(item.key_ptr.*, parsed);
             }
         }
@@ -224,7 +224,7 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
         //log.info("\texpected: '{s}'", .{expected_str});
         log.info("\tParsing..", .{});
         const failed = blk: {
-            const doc_struct_token = mstchz.token.DocToken.parseSliceLeaky(tmp_alloc, template) catch |e| {
+            const doc_struct_token = mstchz.parseSliceLeaky(tmp_alloc, template) catch |e| {
                 log.err("Error occured: {}", .{e});
                 if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
                 break :blk true;
@@ -234,7 +234,7 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
             for (doc_struct_token) |token| switch (token) {
                 .text => |d| log.info("\tTEXT '{s}'", .{d}),
                 .tag => |d| {
-                    log.info("\tTAG {}", .{d.type});
+                    log.info("\tTAG {} (prefix: '{?s}')", .{ d.type, d.standalone_line_prefix });
                     for (d.body) |item| {
                         log.info("\t\t{} '{s}'", .{ item.len, item });
                     }
@@ -247,6 +247,7 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
                 mstchz.Hash{ .inner = data },
                 &partials,
                 doc_struct_token,
+                .{},
             );
             defer vm.deinit();
 

@@ -4,7 +4,6 @@ const mem = std.mem;
 const log = std.log.scoped(.@"mustachez.runtime");
 const assert = std.debug.assert;
 const token = @import("token.zig");
-const Partial = @import("Partial.zig");
 
 const mappings = .{
     .{ .code = '<', .esc = "&lt;" },
@@ -221,17 +220,17 @@ pub fn EscapingWriter(comptime T: type) type {
         buf_len: usize = 0,
 
         pub fn write(self: *Self, bytes: []const u8) Error!usize {
-            log.info("trying to encode and write '{s}'", .{bytes});
+            //log.info("trying to encode and write '{s}'", .{bytes});
 
             const old_buf_rest = self.buf_len;
             const buf_left = self.buf.len - old_buf_rest;
-            log.info("buf left: {} ({s})", .{ buf_left, self.buf[0..old_buf_rest] });
+            //log.info("buf left: {} ({s})", .{ buf_left, self.buf[0..old_buf_rest] });
             const cbuf = if (old_buf_rest == 0) bytes else blk: {
                 const cpy_len = @min(buf_left, bytes.len);
                 @memcpy(self.buf[old_buf_rest..(old_buf_rest + cpy_len)], bytes[0..cpy_len]);
                 break :blk self.buf[0..(old_buf_rest + cpy_len)];
             };
-            log.info("cbuf: {} '{s}'", .{ cbuf.len, cbuf });
+            //log.info("cbuf: {} '{s}'", .{ cbuf.len, cbuf });
 
             const view = std.unicode.Utf8View.initUnchecked(cbuf);
             var it = view.iterator();
@@ -240,7 +239,7 @@ pub fn EscapingWriter(comptime T: type) type {
                 try htmlEscapeChar(cp, self.inner);
             }
 
-            log.info("Ended at position: {}", .{it.i});
+            //log.info("Ended at position: {}", .{it.i});
 
             if (it.i < cbuf.len) {
                 const bytes_left = cbuf.len - it.i;
@@ -252,11 +251,11 @@ pub fn EscapingWriter(comptime T: type) type {
                 self.buf_len = bytes_left;
             } else self.buf_len = 0;
 
-            log.info("it.i {} old_buf_rest: {}", .{ it.i, old_buf_rest });
+            //log.info("it.i {} old_buf_rest: {}", .{ it.i, old_buf_rest });
             if (it.i < old_buf_rest) return 0; // Not even written the rest part
-            log.info("unwritten: {}", .{old_buf_rest});
+            //log.info("unwritten: {}", .{old_buf_rest});
             const written_bytes = bytes.len - old_buf_rest - self.buf_len;
-            log.info("written: {}", .{written_bytes});
+            //log.info("written: {}", .{written_bytes});
             return written_bytes;
         }
 
