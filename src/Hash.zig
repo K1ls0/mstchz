@@ -5,7 +5,6 @@ const log = std.log;
 const Hash = @This();
 
 inner: *const anyopaque,
-//vtable: VTable,
 
 pub const Ctx = VTable;
 pub const VTable = struct {

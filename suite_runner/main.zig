@@ -265,7 +265,7 @@ fn parseCli(alloc: mem.Allocator) ParsedCli {
             "./testing/spec/specs/inverted.json",
             "./testing/spec/specs/partials.json",
             "./testing/spec/specs/sections.json",
-            //"~dynamic-names.json",
+            //"./testing/spec/specs/~dynamic-names.json",
             //"~inheritance.json",
             //"~lambdas.json",
         } else files.items,
