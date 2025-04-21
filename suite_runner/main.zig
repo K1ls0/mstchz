@@ -3,104 +3,12 @@ const mem = std.mem;
 const log = std.log;
 const mstchz = @import("mstchz");
 const ansii = @import("ansii.zig");
+const log_state = @import("log_state.zig");
 
 pub const std_options = std.Options{
     .log_level = .debug,
     //.logFn = logFn,
 };
-
-pub fn logFn(
-    comptime message_level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    const level_txt = comptime message_level.asText();
-    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-
-    const writer = log_state.writer();
-
-    std.debug.lockStdErr();
-    defer std.debug.unlockStdErr();
-    nosuspend {
-        writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
-        log_state.flushIfNotBuffering() catch return;
-    }
-}
-const LogState = struct {
-    out_writer: std.fs.File.Writer,
-    buf: std.ArrayList(u8),
-    mutex: std.Thread.Mutex = .{},
-    buffering: bool = false,
-
-    pub fn init(
-        state: *LogState,
-        alloc: std.mem.Allocator,
-    ) void {
-        state.* = .{ .buf = .init(alloc), .out_writer = std.io.getStdErr().writer() };
-    }
-
-    pub fn deinit(self: *LogState) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        self.buf.deinit();
-        self.buffering = false;
-    }
-
-    pub const WriteError = std.fs.File.Writer.Error || std.ArrayList(u8).Writer.Error || std.mem.Allocator.Error;
-
-    pub fn flushIfNotBuffering(self: *LogState) WriteError!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.buffering) return;
-
-        try self.out_writer.writeAll(self.buf.items);
-        self.buf.clearRetainingCapacity();
-    }
-
-    pub fn flush(self: *LogState) WriteError!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        try self.out_writer.writeAll(self.buf.items);
-        self.buf.clearRetainingCapacity();
-    }
-
-    pub fn clear(self: *LogState) void {
-        self.buf.clearRetainingCapacity();
-    }
-
-    pub fn setExplicitBuffering(self: *LogState, enable: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.buffering = enable;
-    }
-
-    pub fn getBuffering(self: *LogState) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.buffering;
-    }
-
-    pub const Writer = std.io.Writer(*LogState, WriteError, write);
-
-    fn write(ctx: *LogState, bytes: []const u8) WriteError!usize {
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
-        std.debug.lockStdErr();
-        defer std.debug.unlockStdErr();
-
-        return try ctx.buf.writer().write(bytes);
-    }
-
-    pub fn writer(self: *LogState) Writer {
-        return .{ .context = self };
-    }
-};
-
-var log_state: LogState = undefined;
 
 const success_str = ansii.fg.bright_green ++ "passed" ++ ansii.rst;
 const fail_str = ansii.fg.bright_red ++ "failed" ++ ansii.rst;
@@ -110,23 +18,20 @@ pub fn main() !void {
     defer std.debug.assert(dbg_alloc.deinit() == .ok);
     const alloc = dbg_alloc.allocator();
 
-    LogState.init(&log_state, alloc);
+    log_state.init(alloc);
     defer log_state.deinit();
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    var test_arena = std.heap.ArenaAllocator.init(alloc);
-    defer test_arena.deinit();
 
     var all_testcases: usize = 0;
     var all_fails: usize = 0;
     const pcli = parseCli(arena.allocator());
     log_state.setExplicitBuffering(false);
     for (pcli.files) |file| {
-        defer _ = test_arena.reset(.retain_capacity);
         log.info("=========== {s} ===========", .{std.fs.path.basename(file)});
         log.info("=========== START ===========", .{});
-        const r = try testFile(test_arena.allocator(), file);
+        const r = try testFile(dbg_alloc.allocator(), file);
         const res_string = if (r.fails == 0) success_str else fail_str;
 
         log.info("=========== END ===========", .{});
@@ -160,7 +65,11 @@ const TestFileResults = struct {
     }
 };
 
-fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
+fn testFile(alloc: mem.Allocator, path: []const u8) !TestFileResults {
+    var input_arena = std.heap.ArenaAllocator.init(alloc);
+    defer input_arena.deinit();
+    const tmp_alloc = input_arena.allocator();
+
     const cwd = std.fs.cwd();
     const file_text = try cwd.readFileAlloc(tmp_alloc, path, 1 << 24);
     const json_file_content = try std.json.parseFromSliceLeaky(
@@ -182,7 +91,7 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
         const case = case_v.object;
         const name = case.get("name").?.string;
         const desc = case.get("desc").?.string;
-        const data = case.get("data").?;
+        const data = &case.get("data").?;
         const template = case.get("template").?.string;
         const expected_str = case.get("expected").?.string;
         const partials_json = if (case.get("partials")) |v|
@@ -190,7 +99,8 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
         else
             std.json.ObjectMap.init(tmp_alloc);
 
-        var partials = mstchz.PartialMap.init(tmp_alloc);
+        var partials = mstchz.PartialMap.init(alloc);
+        defer partials.deinit();
         {
             var it = partials_json.iterator();
             while (it.next()) |item| {
@@ -201,10 +111,9 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
 
         log.info(ansii.fg.bright_cyan ++ "Test" ++ ansii.rst ++ ": {s} ({s})", .{ name, desc });
 
-        log.info("\tData: {s}", .{try std.json.stringifyAlloc(tmp_alloc, data, .{ .whitespace = .indent_4 })});
+        log.info("\tData: {s}", .{try std.json.stringifyAlloc(tmp_alloc, data.*, .{ .whitespace = .indent_4 })});
         log.info("\ttemplate: `{s}`", .{template});
         log.info("\tpartials: `{s}`", .{try std.json.stringifyAlloc(tmp_alloc, std.json.Value{ .object = partials_json }, .{ .whitespace = .indent_4 })});
-        //log.info("\texpected: '{s}'", .{expected_str});
         log.info("\tParsing..", .{});
         const failed = blk: {
             const doc_struct_token = mstchz.parseSliceLeaky(tmp_alloc, template) catch |e| {
@@ -224,9 +133,11 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
                 },
             };
 
-            var vm = try mstchz.State.init(
-                tmp_alloc,
-                mstchz.Hash{ .inner = data },
+            const hash = mstchz.Hash{ .inner = @ptrCast(data) };
+            var vm = try mstchz.RenderState.init(
+                alloc,
+                hash,
+                hash_impl.vtable,
                 &partials,
                 doc_struct_token,
                 .{},
@@ -258,6 +169,81 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
     }
     return .{ .testcases = cases, .fails = fails };
 }
+
+const hash_impl = struct {
+    const vtable = mstchz.Hash.VTable{
+        .getFieldFn = &getField,
+        .getAtFn = &getAt,
+        .interpolateBoolFn = &interpolateBool,
+        .stringifyFn = &stringify,
+    };
+
+    pub fn getField(_: mstchz.Hash.Ctx, inner: *const anyopaque, name: []const u8) mstchz.Hash.GetFieldError!mstchz.Hash {
+        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
+        switch (val.*) {
+            .object => |o| return if (o.getPtr(name)) |v| mstchz.Hash{ .inner = v } else {
+                log.err("Field '{s}' does not exist!", .{name});
+                return error.FieldNotExistant;
+            },
+            else => {
+                log.err(
+                    "Trying to access '{s}' on value of type {s}",
+                    .{ name, @tagName(val.*) },
+                );
+                return error.NoObject;
+            },
+        }
+    }
+
+    pub fn getAt(_: mstchz.Hash.Ctx, inner: *const anyopaque, idx: usize) mstchz.Hash.GetAtError!mstchz.Hash {
+        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
+
+        switch (val.*) {
+            .array => |*a| {
+                if (idx >= a.items.len) {
+                    log.err("Field '{}' is out of bounds!", .{idx});
+                    return error.OutOfBounds;
+                }
+                return mstchz.Hash{ .inner = &a.items[idx] };
+            },
+            else => {
+                log.err(
+                    "Trying to access field at position '{}' on value of type {s}",
+                    .{ idx, @tagName(val.*) },
+                );
+                return error.NoArray;
+            },
+        }
+    }
+
+    pub fn interpolateBool(_: mstchz.Hash.Ctx, inner: *const anyopaque) bool {
+        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
+
+        return switch (val.*) {
+            .null => false,
+            .bool => |b| b,
+            .integer => |i| i != 0,
+            .float => |f| f != 0.0 and f != std.math.nan(f64),
+            .number_string => true, // This number is not recognisable (it is a big number after all) therefore it will always interpolate to be true.
+            .string => |s| s.len != 0,
+            .object => |*o| o.count() != 0,
+            .array => |*a| a.items.len != 0,
+        };
+    }
+
+    fn stringify(_: mstchz.Hash.Ctx, inner: *const anyopaque, writer: std.io.AnyWriter) anyerror!void {
+        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
+        switch (val.*) {
+            .null => {},
+            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+            .integer => |i| try std.fmt.formatInt(i, 10, .lower, .{}, writer),
+            .float => |f| try std.fmt.format(writer, "{d}", .{f}),
+            .number_string => |nr| try writer.writeAll(nr),
+            .string => |s| try writer.writeAll(s),
+            else => try std.json.stringify(val, .{}, writer),
+        }
+    }
+};
 
 const ParsedCli = struct {
     files: []const []const u8,

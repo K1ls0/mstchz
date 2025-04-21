@@ -5,107 +5,17 @@ const log = std.log.scoped(.mustachez);
 const assert = std.debug.assert;
 
 pub const token = @import("token.zig");
+pub const Token = token.Token;
+pub const TokenType = token.TokenType;
+pub const Tag = token.Tag;
+pub const TagType = token.TagType;
+
 pub const escape = @import("escape.zig");
 pub const Tokenizer = @import("Tokenizer.zig");
+pub const Hash = @import("Hash.zig");
 pub const parseSliceLeaky = Tokenizer.parseSliceLeaky;
 
-pub const PartialMap = std.StringHashMap([]const token.Token);
-
-pub const Hash = struct {
-    inner: std.json.Value,
-
-    pub const GetError = error{ FieldNotAccessable, FieldNotExistant, AtArrayEnd };
-    pub fn getField(self: Hash, name: []const u8) GetError!Hash {
-        switch (self.inner) {
-            .object => |o| return if (o.get(name)) |v| .{ .inner = v } else {
-                log.err("Field '{s}' does not exist!", .{name});
-                return error.FieldNotExistant;
-            },
-            else => {
-                log.err(
-                    "Trying to access '{s}' on value of type {s}",
-                    .{ name, @tagName(self.inner) },
-                );
-                return error.FieldNotAccessable;
-            },
-        }
-    }
-
-    pub fn interpolateBool(self: Hash) bool {
-        return switch (self.inner) {
-            .null => false,
-            .bool => |b| b,
-            .integer => |i| i != 0,
-            .float => |f| f != 0.0 and f != std.math.nan(f64),
-            .number_string => @panic("Unsupported BigNumbers"),
-            .string => |s| s.len != 0,
-            .object => |o| o.count() != 0,
-            .array => |a| a.items.len != 0,
-        };
-    }
-
-    pub fn indexable(self: Hash) bool {
-        return switch (self.inner) {
-            .object, .array => true,
-            else => false,
-        };
-    }
-
-    pub const IterError = error{NotIterable};
-
-    pub fn iterator(self: Hash) IterError!Iterator {
-        switch (self.inner) {
-            .array => |v| return Iterator{ .val = v.items, .idx = 0 },
-            else => return error.NotIterable,
-        }
-    }
-
-    pub const Iterator = struct {
-        val: []const std.json.Value,
-        idx: usize,
-
-        pub fn peek(self: Iterator) ?Hash {
-            if (self.idx >= self.val.len) return null;
-            return Hash{ .inner = self.val[self.idx] };
-        }
-
-        pub fn next(self: *Iterator) ?Hash {
-            if (self.idx >= self.val.len) return null;
-            defer self.idx += 1;
-            return Hash{ .inner = self.val[self.idx] };
-        }
-    };
-
-    pub fn stringify(self: Hash, writer: anytype) @TypeOf(writer).Error!void {
-        switch (self.inner) {
-            .null => {},
-            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
-            .integer => |i| try std.fmt.formatInt(i, 10, .lower, .{}, writer),
-            .float => |f| try std.fmt.format(writer, "{d}", .{f}),
-            .number_string => |nr| try writer.writeAll(nr),
-            .string => |s| try writer.writeAll(s), // TODO Escape html
-            else => try std.json.stringify(self.inner, .{}, writer), // TODO: Escape html
-        }
-    }
-
-    pub const SubResult = union(enum) {
-        found: Hash,
-        not_found_fully,
-        not_found,
-    };
-    pub fn sub(self: Hash, accessors: []const []const u8) SubResult {
-        var chash = self;
-        var first = true;
-        for (accessors) |v| {
-            chash = chash.getField(v) catch {
-                if (first) return .not_found;
-                return .not_found_fully;
-            };
-            first = false;
-        }
-        return .{ .found = chash };
-    }
-};
+pub const PartialMap = std.StringHashMap([]const Token);
 
 pub const Scope = struct {
     state: ScopeState,
@@ -136,7 +46,7 @@ pub const Scope = struct {
     }
     pub fn getStartAccessor(
         self: Scope,
-        tokens: []const token.Token,
+        tokens: []const Token,
     ) ?[]const []const u8 {
         const start = self.start_tag orelse return null;
         assert(start < tokens.len);
@@ -155,43 +65,46 @@ fn accessorsEql(self: []const []const u8, other: []const []const u8) bool {
     return true;
 }
 
-pub const State = struct {
+pub const RenderState = struct {
     allocator: mem.Allocator,
     exec_arena: std.heap.ArenaAllocator,
 
     scopes: Scopes,
 
     partials: *const PartialMap,
-    input: []const token.Token,
+    input: []const Token,
 
     standalone_line_prefix: ?[]const u8,
+    hash_ctx: Hash.Ctx,
 
     pub const InitOptions = struct {
         line_prefix: ?[]const u8 = null,
     };
     pub fn init(
         allocator: mem.Allocator,
-        ctx: Hash,
+        hash: Hash,
+        hash_ctx: Hash.Ctx,
         partials: *const PartialMap,
-        input: []const token.Token,
+        input: []const Token,
         options: InitOptions,
-    ) mem.Allocator.Error!State {
+    ) mem.Allocator.Error!RenderState {
         var scopes = try Scopes.init(allocator);
         try scopes.push(Scope{
             .start_tag = null,
-            .state = .{ .block = .{ .hash = ctx, .block_state = .run } },
+            .state = .{ .block = .{ .hash = hash, .block_state = .run } },
         }, &.{});
-        return State{
+        return RenderState{
             .allocator = allocator,
             .exec_arena = .init(allocator),
             .partials = partials,
             .input = input,
             .standalone_line_prefix = options.line_prefix,
             .scopes = scopes,
+            .hash_ctx = hash_ctx,
         };
     }
 
-    pub fn deinit(self: *State) void {
+    pub fn deinit(self: *RenderState) void {
         self.scopes.deinit();
         self.exec_arena.deinit();
     }
@@ -204,9 +117,9 @@ pub const State = struct {
         PartialAcceptsOneArgument,
         PartialNotAvailable,
         EncodingError,
-    } || Hash.GetError || Hash.IterError;
+    } || Hash.GetFieldError || Hash.IterError;
 
-    pub fn render(self: *State, writer: anytype) (RenderError || mem.Allocator.Error || @TypeOf(writer).Error)!void {
+    pub fn render(self: *RenderState, writer: anytype) (RenderError || mem.Allocator.Error || @TypeOf(writer).Error)!void {
         if (self.standalone_line_prefix) |prefix| try writer.writeAll(prefix);
 
         var token_idx: usize = 0;
@@ -242,23 +155,23 @@ pub const State = struct {
                     .comment => assert(t.body.len == 1),
                     .delimiter_change => assert(t.body.len == 2),
                     .variable, .unescaped_variable => |any_variable| {
-                        const sub_hash = self.scopes.lookup(t.body) orelse continue;
+                        const sub_hash = self.scopes.lookup(self.hash_ctx, t.body) orelse continue;
 
                         if (self.scopes.currentScope().blockState() == .skip) continue;
                         switch (any_variable) {
                             .variable => {
                                 var encoding_writer = escape.escapingWriter(writer);
                                 const ewriter = encoding_writer.writer();
-                                try sub_hash.stringify(ewriter);
+                                try sub_hash.stringify(self.hash_ctx, ewriter);
                             },
-                            .unescaped_variable => try sub_hash.stringify(writer),
+                            .unescaped_variable => try sub_hash.stringify(self.hash_ctx, writer),
                             else => unreachable,
                         }
                     },
                     .section_open => {
                         const current_is_skip = self.scopes.currentScope().blockState() == .skip;
 
-                        const sub_hash: ?Hash = self.scopes.lookup(t.body) orelse null;
+                        const sub_hash: ?Hash = self.scopes.lookup(self.hash_ctx, t.body) orelse null;
 
                         const new_scope = if (sub_hash) |ch| blk: {
                             // We are skipping already, but still need to keep track of tags,
@@ -268,8 +181,13 @@ pub const State = struct {
                                 .state = .{ .block = .{ .hash = null, .block_state = .skip } },
                             };
 
-                            if (ch.interpolateBool()) {
-                                if (ch.iterator()) |it| {
+                            {
+                                const v: *const std.json.Value = @ptrCast(@alignCast(ch.inner));
+                                const r = std.json.stringifyAlloc(std.heap.smp_allocator, v.*, .{}) catch |e| std.debug.panic("{}", .{e});
+                                defer std.heap.smp_allocator.free(r);
+                            }
+                            if (ch.interpolateBool(self.hash_ctx)) {
+                                if (ch.iterator(self.hash_ctx)) |it| {
                                     break :blk Scope{ // Iterable scope
                                         .state = Scope.ScopeState{ .iter = it },
                                         .start_tag = token_idx,
@@ -302,8 +220,8 @@ pub const State = struct {
                     .inverted_section_open => {
                         const current_is_skip = self.scopes.currentScope().blockState() == .skip;
 
-                        const run_section = if (self.scopes.lookup(t.body)) |ch| blk: {
-                            break :blk !ch.interpolateBool();
+                        const run_section = if (self.scopes.lookup(self.hash_ctx, t.body)) |ch| blk: {
+                            break :blk !ch.interpolateBool(self.hash_ctx);
                         } else blk: {
                             break :blk true;
                         };
@@ -329,8 +247,8 @@ pub const State = struct {
                         switch (cscope.state) {
                             .block => |_| _ = self.scopes.pop(t.body),
                             .iter => |*it| {
-                                _ = it.next();
-                                if (it.peek()) |_| {
+                                _ = it.next(self.hash_ctx);
+                                if (it.peek(self.hash_ctx)) |_| {
                                     token_idx = cscope.start_tag.?;
                                 } else {
                                     _ = self.scopes.pop(t.body);
@@ -343,11 +261,12 @@ pub const State = struct {
                         if (self.scopes.currentScope().blockState() == .skip) continue;
 
                         const partial_name = t.body[0];
-                        const chash = self.scopes.currentHash();
+                        const chash = self.scopes.currentHash(self.hash_ctx);
                         if (self.partials.*.get(partial_name)) |partial| {
-                            var state = try State.init(
+                            var state = try RenderState.init(
                                 self.allocator,
                                 chash,
+                                self.hash_ctx,
                                 self.partials,
                                 partial,
                                 .{ .line_prefix = t.standalone_line_prefix },
@@ -362,7 +281,7 @@ pub const State = struct {
             }
         }
     }
-    fn isTextAndLaggingNewline(input: []const token.Token, prefix: ?[]const u8, i: usize) bool {
+    fn isTextAndLaggingNewline(input: []const Token, prefix: ?[]const u8, i: usize) bool {
         return input.len != 0 and
             i == (input.len - 1) and
             prefix != null and
@@ -405,7 +324,7 @@ pub const Scopes = struct {
         return self.stack.pop().?;
     }
 
-    pub fn currentHash(self: Scopes) Hash {
+    pub fn currentHash(self: Scopes, ctx: Hash.Ctx) Hash {
         assert(self.stack.items.len > 0);
         assert(self.stack.items[0].state == .block);
         assert(self.stack.items[0].state.block.hash != null);
@@ -414,7 +333,7 @@ pub const Scopes = struct {
             const i = self.stack.items.len - 1 - u;
             switch (self.stack.items[i].state) {
                 .block => |b| if (b.hash) |h| return h,
-                .iter => |*it| if (it.peek()) |h| return h,
+                .iter => |*it| if (it.peek(ctx)) |h| return h,
             }
         }
         @panic("At least the root scope has to be occupied, so this should not happen " ++
@@ -441,7 +360,7 @@ pub const Scopes = struct {
         i: usize,
         stack: []const Scope,
 
-        pub fn next(self: *HashIterator) ?Hash {
+        pub fn next(self: *HashIterator, ctx: Hash.Ctx) ?Hash {
             if (self.i >= self.stack.len) return null;
 
             while (self.i < self.stack.len) {
@@ -450,7 +369,7 @@ pub const Scopes = struct {
                 const i = self.stack.len - 1 - self.i;
                 switch (self.stack[i].state) {
                     .block => |b| if (b.hash) |h| return h,
-                    .iter => |*it| if (it.peek()) |h| return h,
+                    .iter => |*it| if (it.peek(ctx)) |h| return h,
                 }
             }
             return null;
@@ -461,14 +380,14 @@ pub const Scopes = struct {
         return HashIterator{ .i = 0, .stack = self.stack.items };
     }
 
-    pub fn lookup(self: Scopes, accessors: []const []const u8) ?Hash {
+    pub fn lookup(self: Scopes, ctx: Hash.Ctx, accessors: []const []const u8) ?Hash {
         assert(self.stack.items.len > 0);
         assert(self.stack.items[0].state == .block);
         assert(self.stack.items[0].state.block.hash != null);
 
         var it = self.hashIterator();
-        while (it.next()) |h| {
-            switch (h.sub(accessors)) {
+        while (it.next(ctx)) |h| {
+            switch (h.sub(ctx, accessors)) {
                 .found => |v| return v,
                 .not_found_fully => return null,
                 .not_found => {},
