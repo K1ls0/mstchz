@@ -6,9 +6,10 @@ const assert = std.debug.assert;
 const escape = @import("escape.zig");
 const token = @import("token.zig");
 const Token = token.Token;
+const Tokens = @import("Tokens.zig");
 pub const Hash = @import("Hash.zig");
 
-pub const PartialMap = std.StringHashMap([]const Token);
+pub const PartialMap = std.StringHashMap(Tokens);
 const Scopes = @import("Scopes.zig");
 
 const RenderState = @This();
@@ -216,7 +217,7 @@ pub fn render(self: *RenderState, writer: anytype) (RenderError || mem.Allocator
                             chash,
                             self.hash_ctx,
                             self.partials,
-                            partial,
+                            partial.value,
                             .{ .line_prefix = t.standalone_line_prefix },
                         );
                         defer state.deinit();

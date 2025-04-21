@@ -100,11 +100,17 @@ fn testFile(alloc: mem.Allocator, path: []const u8) !TestFileResults {
             std.json.ObjectMap.init(tmp_alloc);
 
         var partials = mstchz.PartialMap.init(alloc);
-        defer partials.deinit();
+        defer {
+            var it = partials.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit();
+            }
+            partials.deinit();
+        }
         {
             var it = partials_json.iterator();
             while (it.next()) |item| {
-                const parsed = try mstchz.parseSliceLeaky(tmp_alloc, item.value_ptr.string);
+                const parsed = try mstchz.Tokens.parse(alloc, item.value_ptr.string);
                 try partials.put(item.key_ptr.*, parsed);
             }
         }
@@ -116,39 +122,17 @@ fn testFile(alloc: mem.Allocator, path: []const u8) !TestFileResults {
         log.info("\tpartials: `{s}`", .{try std.json.stringifyAlloc(tmp_alloc, std.json.Value{ .object = partials_json }, .{ .whitespace = .indent_4 })});
         log.info("\tParsing..", .{});
         const failed = blk: {
-            const doc_struct_token = mstchz.parseSliceLeaky(tmp_alloc, template) catch |e| {
-                log.err("Error occured: {}", .{e});
-                if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
-                break :blk true;
-            };
-
-            log.info("Tokens:", .{});
-            for (doc_struct_token) |token| switch (token) {
-                .text => |d| log.info("\tTEXT '{s}'", .{d}),
-                .tag => |d| {
-                    log.info("\tTAG {} (prefix: '{?s}')", .{ d.type, d.standalone_line_prefix });
-                    for (d.body) |item| {
-                        log.info("\t\t{} '{s}'", .{ item.len, item });
-                    }
-                },
-            };
-
             const hash = mstchz.Hash{ .inner = @ptrCast(data) };
-            var vm = try mstchz.RenderState.init(
-                alloc,
-                hash,
-                hash_impl.vtable,
-                &partials,
-                doc_struct_token,
-                .{},
-            );
-            defer vm.deinit();
-
             var out_buf = std.ArrayList(u8).init(tmp_alloc);
-            vm.render(out_buf.writer()) catch |e| {
-                log.err("Error: {}", .{e});
-                break :blk true;
-            };
+            try mstchz.renderTemplate(
+                alloc,
+                template,
+                hash,
+                &partials,
+                out_buf.writer(),
+                .{ .hash_ctx = mstchz.hash_impl.json.vtable },
+            );
+
             log.info("\tRendered: '{s}'", .{out_buf.items});
             log.info("\tExpected: '{s}'", .{expected_str});
 
@@ -169,81 +153,6 @@ fn testFile(alloc: mem.Allocator, path: []const u8) !TestFileResults {
     }
     return .{ .testcases = cases, .fails = fails };
 }
-
-const hash_impl = struct {
-    const vtable = mstchz.Hash.VTable{
-        .getFieldFn = &getField,
-        .getAtFn = &getAt,
-        .interpolateBoolFn = &interpolateBool,
-        .stringifyFn = &stringify,
-    };
-
-    pub fn getField(_: mstchz.Hash.Ctx, inner: *const anyopaque, name: []const u8) mstchz.Hash.GetFieldError!mstchz.Hash {
-        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
-        switch (val.*) {
-            .object => |o| return if (o.getPtr(name)) |v| mstchz.Hash{ .inner = v } else {
-                log.err("Field '{s}' does not exist!", .{name});
-                return error.FieldNotExistant;
-            },
-            else => {
-                log.err(
-                    "Trying to access '{s}' on value of type {s}",
-                    .{ name, @tagName(val.*) },
-                );
-                return error.NoObject;
-            },
-        }
-    }
-
-    pub fn getAt(_: mstchz.Hash.Ctx, inner: *const anyopaque, idx: usize) mstchz.Hash.GetAtError!mstchz.Hash {
-        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
-
-        switch (val.*) {
-            .array => |*a| {
-                if (idx >= a.items.len) {
-                    log.err("Field '{}' is out of bounds!", .{idx});
-                    return error.OutOfBounds;
-                }
-                return mstchz.Hash{ .inner = &a.items[idx] };
-            },
-            else => {
-                log.err(
-                    "Trying to access field at position '{}' on value of type {s}",
-                    .{ idx, @tagName(val.*) },
-                );
-                return error.NoArray;
-            },
-        }
-    }
-
-    pub fn interpolateBool(_: mstchz.Hash.Ctx, inner: *const anyopaque) bool {
-        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
-
-        return switch (val.*) {
-            .null => false,
-            .bool => |b| b,
-            .integer => |i| i != 0,
-            .float => |f| f != 0.0 and f != std.math.nan(f64),
-            .number_string => true, // This number is not recognisable (it is a big number after all) therefore it will always interpolate to be true.
-            .string => |s| s.len != 0,
-            .object => |*o| o.count() != 0,
-            .array => |*a| a.items.len != 0,
-        };
-    }
-
-    fn stringify(_: mstchz.Hash.Ctx, inner: *const anyopaque, writer: std.io.AnyWriter) anyerror!void {
-        const val: *const std.json.Value = @ptrCast(@alignCast(inner));
-        switch (val.*) {
-            .null => {},
-            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
-            .integer => |i| try std.fmt.formatInt(i, 10, .lower, .{}, writer),
-            .float => |f| try std.fmt.format(writer, "{d}", .{f}),
-            .number_string => |nr| try writer.writeAll(nr),
-            .string => |s| try writer.writeAll(s),
-            else => try std.json.stringify(val, .{}, writer),
-        }
-    }
-};
 
 const ParsedCli = struct {
     files: []const []const u8,

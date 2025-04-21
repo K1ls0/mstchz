@@ -6,7 +6,6 @@ pub fn InsertingWriter(comptime W: type) type {
     return struct {
         const Self = @This();
 
-        prev_byte: u8,
         marker: u8,
         to_insert: []const u8,
         w: W,
@@ -19,11 +18,10 @@ pub fn InsertingWriter(comptime W: type) type {
             var start: usize = 0;
             for (bytes, 0..) |b, i| {
                 if (b == ctx.marker) {
-                    try ctx.w.writeAll(bytes[start..i]);
+                    try ctx.w.writeAll(bytes[start .. i + 1]);
                     try ctx.w.writeAll(ctx.to_insert);
-                    start = i;
+                    start = i + 1;
                 }
-                ctx.prev_byte = b;
             }
             try ctx.w.writeAll(bytes[start..]);
             return bytes.len;
@@ -40,11 +38,10 @@ pub fn insertingWriter(
     opts: struct {
         marker: u8,
         to_insert: []const u8,
-        insert_at_start: bool = false,
+        //insert_at_start: bool = false,
     },
 ) InsertingWriter(@TypeOf(writer)) {
     return InsertingWriter(@TypeOf(writer)){
-        .prev_byte = if (opts.insert_at_start) opts.marker else (opts.marker +% 1),
         .marker = opts.marker,
         .to_insert = opts.to_insert,
         .w = writer,
@@ -56,7 +53,7 @@ fn testInsertingWriter(alloc: mem.Allocator, input: []const u8) ![]const u8 {
     var inserting_writer = insertingWriter(buf.writer(), .{
         .to_insert = "|",
         .marker = '\n',
-        .insert_at_start = false,
+        //.insert_at_start = false,
     });
     const writer = inserting_writer.writer();
 

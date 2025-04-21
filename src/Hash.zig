@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const log = std.log;
+const testing = std.testing;
 
 const Hash = @This();
 
@@ -35,6 +36,12 @@ pub fn sub(self: Hash, ctx: Ctx, accessors: []const []const u8) SubResult {
     var chash = self;
     var first = true;
     for (accessors) |v| {
+        // Try to access array, if it's not working, fall back to get field of object.
+        if (std.fmt.parseInt(usize, v, 10)) |i| {
+            if (chash.getAt(ctx, i)) |h| {
+                return .{ .found = h };
+            } else |_| {}
+        } else |_| {}
         chash = chash.getField(ctx, v) catch {
             if (first) return .not_found;
             return .not_found_fully;
@@ -44,7 +51,33 @@ pub fn sub(self: Hash, ctx: Ctx, accessors: []const []const u8) SubResult {
     return .{ .found = chash };
 }
 
-pub const SubResult = union(enum) {
+test "Hash.sub.number_idx" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const hash_json = std.json.Value{
+        .array = blk: {
+            var a = std.json.Array.init(arena.allocator());
+            try a.appendSlice(&.{
+                std.json.Value{ .string = "Here 0" },
+                std.json.Value{ .string = "Here 1" },
+                std.json.Value{ .string = "Here 2" },
+            });
+            break :blk a;
+        },
+    };
+    const hash_ctx = @import("hash_impl/json.zig").vtable;
+    const hash = Hash{ .inner = @ptrCast(&hash_json) };
+    {
+        const got_hash = hash.sub(hash_ctx, &.{"1"});
+        try testing.expect(SubResultTag.found == got_hash);
+        const got: *const std.json.Value = @ptrCast(@alignCast(got_hash.found.inner));
+        try testing.expectEqualDeep(std.json.Value{ .string = "Here 1" }, got.*);
+    }
+}
+
+pub const SubResultTag = enum { found, not_found_fully, not_found };
+pub const SubResult = union(SubResultTag) {
     found: Hash,
     not_found_fully,
     not_found,
