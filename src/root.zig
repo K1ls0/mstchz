@@ -3,14 +3,15 @@ const mem = std.mem;
 
 const LibraryConfiguration = @import("LibraryConfiguration.zig");
 
-pub const token = @import("token.zig");
-pub const tokens = @import("tokens.zig");
-pub const tokenizer = @import("tokenizer.zig");
-pub const render_state = @import("render_state.zig");
-
 pub fn Mstchz(comptime config: LibraryConfiguration) type {
     return struct {
         pub const Hash = @import("Hash.zig");
+        pub const hash_impl = @import("hash_impl/hash_impl.zig");
+        pub const token = @import("token.zig");
+        pub const tokens = @import("tokens.zig");
+        pub const tokenizer = @import("tokenizer.zig");
+        pub const render_state = @import("render_state.zig");
+
         pub const Token = token.Token;
         pub const TokenType = token.TokenType;
         pub const Tag = token.Tag;
@@ -21,8 +22,6 @@ pub fn Mstchz(comptime config: LibraryConfiguration) type {
         pub const RenderState = render_state.RenderState(config);
 
         pub const PartialMap = RenderState.PartialMap;
-
-        pub const hash_impl = @import("hash_impl/hash_impl.zig");
 
         pub const Configuration = struct {
             dynamic_names: bool = false,
