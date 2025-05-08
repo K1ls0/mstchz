@@ -24,6 +24,13 @@ pub fn deinit(self: Scopes) void {
     self.stack.deinit();
 }
 
+pub fn clone(self: Scopes) mem.Allocator.Error!Scopes {
+    return Scopes{
+        .debug_lookup = try self.debug_lookup.clone(),
+        .stack = try self.stack.clone(),
+    };
+}
+
 pub fn push(self: *Scopes, scope: Scope, accessors: []const []const u8) mem.Allocator.Error!void {
     try self.debug_lookup.appendSlice(accessors);
 
@@ -53,6 +60,10 @@ pub fn currentHash(self: Scopes, ctx: Hash.Ctx) Hash {
     }
     @panic("At least the root scope has to be occupied, so this should not happen " ++
         "(No valid scope hash available)");
+}
+
+pub fn resetStarts(self: *Scopes) void {
+    for (self.stack.items) |*item| item.resetStart();
 }
 
 pub fn currentScope(self: Scopes) *Scope {
@@ -98,7 +109,9 @@ fn hashIterator(self: Scopes) HashIterator {
 pub fn lookup(self: Scopes, ctx: Hash.Ctx, accessors: []const []const u8) ?Hash {
     assert(self.stack.items.len > 0);
     assert(self.stack.items[0].state == .block);
+    const hash = self.stack.items[0].state.block.hash;
     assert(self.stack.items[0].state.block.hash != null);
+    _ = hash;
 
     var it = self.hashIterator();
     while (it.next(ctx)) |h| {
@@ -148,5 +161,9 @@ pub const Scope = struct {
             .text => null,
             .tag => |t| t.body,
         };
+    }
+
+    pub fn resetStart(self: *Scope) void {
+        self.start_tag = null;
     }
 };

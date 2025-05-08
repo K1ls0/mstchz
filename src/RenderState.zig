@@ -55,6 +55,26 @@ pub fn init(
     };
 }
 
+pub fn initFromScopes(
+    allocator: mem.Allocator,
+    scopes: Scopes,
+    hash_ctx: Hash.Ctx,
+    partials: *const PartialMap,
+    input: []const Token,
+    options: InitOptions,
+) mem.Allocator.Error!RenderState {
+    return RenderState{
+        .allocator = allocator,
+        .exec_arena = .init(allocator),
+        .partials = partials,
+        .input = input,
+        .standalone_line_prefix = options.line_prefix,
+        .scopes = scopes,
+        .hash_ctx = hash_ctx,
+        .token_idx = 0,
+    };
+}
+
 pub fn deinit(self: *RenderState) void {
     self.scopes.deinit();
     self.exec_arena.deinit();
@@ -205,16 +225,40 @@ pub fn render(self: *RenderState, writer: anytype) (RenderError || mem.Allocator
                         },
                     }
                 },
-                .partial => {
-                    assert(t.body.len == 1);
+                .partial, .partial_dynamic => |p| {
                     if (self.scopes.currentScope().blockState() == .skip) continue;
 
-                    const partial_name = t.body[0];
-                    const chash = self.scopes.currentHash(self.hash_ctx);
+                    const partial_name = switch (p) {
+                        .partial => blk: {
+                            assert(t.body.len == 1);
+                            log.info("[partial] '{s}'", .{t.body[0]});
+                            break :blk t.body[0];
+                        },
+                        .partial_dynamic => blk: {
+                            const sub_hash = self.scopes.lookup(self.hash_ctx, t.body) orelse continue;
+                            var buf = try std.ArrayList(u8).initCapacity(
+                                self.exec_arena.allocator(),
+                                128,
+                            );
+                            try sub_hash.stringify(self.hash_ctx, buf.writer());
+
+                            log.info("[dynamic partial] body:", .{});
+                            for (t.body) |item| {
+                                log.info("[dynamic partial]\t'{s}'", .{item});
+                            }
+                            log.info("[dynamic partial] -> '{s}'", .{buf.items});
+                            break :blk buf.items;
+                        },
+                        else => unreachable,
+                    };
+
+                    self.scopes.printCurrentLookup();
                     if (self.partials.*.get(partial_name)) |partial| {
-                        var state = try RenderState.init(
+                        var new_scopes = try self.scopes.clone();
+                        new_scopes.resetStarts();
+                        var state = try RenderState.initFromScopes(
                             self.allocator,
-                            chash,
+                            new_scopes,
                             self.hash_ctx,
                             self.partials,
                             partial.value,

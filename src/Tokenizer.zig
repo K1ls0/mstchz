@@ -185,9 +185,21 @@ pub fn parseToken(alloc: mem.Allocator, input: []const u8) ParseTokenError!Tag {
         trimmed = trimmed[1..(trimmed.len - 1)];
     } else {
         tag = TagType.fromSpecifier(input[0]);
-        trimmed = if (tag == .variable) trimmed else trimmed[1..];
+        trimmed = switch (tag) {
+            .variable => trimmed,
+            else => trimmed[1..],
+        };
     }
     trimmed = std.mem.trim(u8, trimmed, &std.ascii.whitespace);
+    { // dynamic partials
+        if (trimmed.len > 0) switch (trimmed[0]) {
+            '*' => {
+                tag = .partial_dynamic;
+                trimmed = std.mem.trimLeft(u8, trimmed[1..], &std.ascii.whitespace);
+            },
+            else => {},
+        };
+    }
 
     const body: []const []const u8 = switch (tag) {
         .delimiter_change => blk: {
@@ -295,9 +307,9 @@ fn testTokenizer(
     var tokenizer = Tokenizer.init(arena.allocator(), input);
     for (expected) |exp_token| {
         const res_token = try tokenizer.nextToken() orelse return error.TooFewTokens;
-        std.debug.print("----------------\n", .{});
-        res_token.debugPrint();
-        std.debug.print("----------------\n", .{});
+        //std.debug.print("----------------\n", .{});
+        //res_token.debugPrint();
+        //std.debug.print("----------------\n", .{});
         try testing.expectEqualDeep(exp_token, res_token);
     }
 

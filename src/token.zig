@@ -41,6 +41,7 @@ pub const TagType = enum {
     unescaped_variable,
     comment,
     partial,
+    partial_dynamic,
     delimiter_change,
 
     pub fn fromSpecifier(c: u8) TagType {
