@@ -197,6 +197,7 @@ fn printHelpAndExit(
         var it = std.process.args();
         break :blk it.next() orelse "mstchz_tests";
     };
+
     std.debug.print(
         \\{s} <test json schema files>...
         \\
