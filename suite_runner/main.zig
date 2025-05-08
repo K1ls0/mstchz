@@ -1,7 +1,9 @@
 const std = @import("std");
 const mem = std.mem;
 const log = std.log;
-const mstchz = @import("mstchz");
+const mstchz = @import("mstchz").Mstchz(.{
+    .with_dynamic_partials = true,
+});
 const ansii = @import("ansii.zig");
 const log_state = @import("log_state.zig");
 
@@ -128,9 +130,9 @@ fn testFile(alloc: mem.Allocator, path: []const u8) !TestFileResults {
                 alloc,
                 template,
                 hash,
+                mstchz.hash_impl.json.vtable,
                 &partials,
                 out_buf.writer(),
-                .{ .hash_ctx = mstchz.hash_impl.json.vtable },
             );
 
             log.info("\tRendered: '{s}'", .{out_buf.items});
@@ -174,7 +176,7 @@ fn parseCli(alloc: mem.Allocator) ParsedCli {
             "./testing/spec/specs/inverted.json",
             "./testing/spec/specs/partials.json",
             "./testing/spec/specs/sections.json",
-            //"./testing/spec/specs/~dynamic-names.json",
+            "./testing/spec/specs/~dynamic-names.json",
             //"~inheritance.json",
             //"~lambdas.json",
         } else files.items,

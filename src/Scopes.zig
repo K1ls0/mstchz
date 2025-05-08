@@ -151,6 +151,7 @@ pub const Scope = struct {
             },
         };
     }
+
     pub fn getStartAccessor(
         self: Scope,
         tokens: []const Token,
