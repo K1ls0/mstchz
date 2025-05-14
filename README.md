@@ -1,5 +1,6 @@
 # A small mustache templating engine Zig implementation.
 
-# Mentions
+This library is not ready for usage, no documentation exists besides the code itself.
 
-[github.com/no1msd/mstch]
+# Mentions
+[github.com/no1msd/mstch](github.com/no1msd/mstch)
