@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const testing = std.testing;
 const mem = std.mem;
 const log = std.log.scoped(.mustachez);
@@ -39,7 +40,7 @@ pub const State = struct {
         NoObject,
         NoField,
     };
-    pub fn render(self: *State, writer: anytype) (RenderError || @TypeOf(writer).Error)!void {
+    pub fn render(self: *State, writer: *Io.Writer) (RenderError || Io.Writer.Error)!void {
         for (self.input) |ctoken| {
             switch (ctoken) {
                 .text => |txt| try writer.writeAll(txt),

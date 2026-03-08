@@ -109,13 +109,13 @@ pub const DocumentStructureToken = union(DocumentStructureTokenTag) {
         alloc: mem.Allocator,
         input: []const u8,
     ) ParseError![]const DocumentStructureToken {
-        var list = std.ArrayList(DocumentStructureToken).init(alloc);
-        defer list.deinit();
+        var list = std.ArrayList(DocumentStructureToken).empty;
+        defer list.deinit(alloc);
         var state = DocumentStructureTokenizer.init(alloc, input);
         while (try state.nextToken()) |token| {
-            try list.append(token);
+            try list.append(alloc, token);
         }
-        return try list.toOwnedSlice();
+        return try list.toOwnedSlice(alloc);
     }
 };
 
@@ -150,7 +150,7 @@ pub const Token = struct {
 pub const ParseTokenError = ParseDelimsError || ParseVariableError || mem.Allocator.Error;
 
 pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!Token {
-    var trimmed = std.mem.trimRight(u8, input, &std.ascii.whitespace);
+    var trimmed = std.mem.trimEnd(u8, input, &std.ascii.whitespace);
     //defer {
     //    std.debug.print("||parse token out: '{s}'||", .{trimmed});
     //}

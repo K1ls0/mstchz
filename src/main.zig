@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const mem = std.mem;
 const log = std.log;
 const mstchz = @import("mstchz");
@@ -11,7 +12,7 @@ pub const std_options = std.Options{
 
 pub fn logFn(
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -28,27 +29,36 @@ pub fn logFn(
     }
 }
 const LogState = struct {
-    out_writer: std.fs.File.Writer,
+    alloc: mem.Allocator,
+    out_writer: std.Io.File.Writer,
+    out_writer_buf: [1024]u8,
     buf: std.ArrayList(u8),
-    mutex: std.Thread.Mutex = .{},
+    mutex: Io.Mutex = .init,
     buffering: bool = false,
 
     pub fn init(
         state: *LogState,
         alloc: std.mem.Allocator,
+        io: Io,
     ) void {
-        state.* = .{ .buf = .init(alloc), .out_writer = std.io.getStdErr().writer() };
+        const stderr_f = Io.File.stderr();
+        state.* = .{
+            .buf = .empty,
+            .out_writer = stderr_f.writer(io, &state.out_writer_buf),
+            .alloc = alloc,
+            .out_writer_buf = undefined,
+        };
     }
 
-    pub fn deinit(self: *LogState) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn deinit(self: *LogState, io: Io) void {
+        self.mutex.lock(io) catch return;
+        defer self.mutex.unlock(io);
 
-        self.buf.deinit();
+        self.buf.deinit(self.alloc);
         self.buffering = false;
     }
 
-    pub const WriteError = std.fs.File.Writer.Error || std.ArrayList(u8).Writer.Error || std.mem.Allocator.Error;
+    pub const WriteError = Io.Writer.Error || std.mem.Allocator.Error;
 
     pub fn flushIfNotBuffering(self: *LogState) WriteError!void {
         self.mutex.lock();
@@ -62,13 +72,13 @@ const LogState = struct {
         self.buf.clearRetainingCapacity();
     }
 
-    pub fn flush(self: *LogState) WriteError!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn flush(self: *LogState, io: Io) (WriteError || Io.Cancelable)!void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
         //std.debug.print("-....flushing because always does: \n'{s}'\n", .{self.buf.items});
 
-        try self.out_writer.writeAll(self.buf.items);
+        try self.out_writer.interface.writeAll(self.buf.items);
         self.buf.clearRetainingCapacity();
     }
 
@@ -76,9 +86,9 @@ const LogState = struct {
         self.buf.clearRetainingCapacity();
     }
 
-    pub fn setExplicitBuffering(self: *LogState, enable: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn setExplicitBuffering(self: *LogState, io: Io, enable: bool) Io.Cancelable!void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
         self.buffering = enable;
     }
 
@@ -111,28 +121,22 @@ var log_state: LogState = undefined;
 const success_str = ansii.fg.bright_green ++ "passed" ++ ansii.rst;
 const fail_str = ansii.fg.bright_red ++ "failed" ++ ansii.rst;
 
-pub fn main() !void {
-    var dbg_alloc = std.heap.DebugAllocator(.{ .safety = true }).init;
-    defer std.debug.assert(dbg_alloc.deinit() == .ok);
-    const alloc = dbg_alloc.allocator();
+pub fn main(init: std.process.Init) !void {
+    LogState.init(&log_state, init.gpa, init.io);
+    defer log_state.deinit(init.io);
 
-    LogState.init(&log_state, alloc);
-    defer log_state.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    var test_arena = std.heap.ArenaAllocator.init(alloc);
+    var test_arena = std.heap.ArenaAllocator.init(init.gpa);
     defer test_arena.deinit();
 
     var all_testcases: usize = 0;
     var all_fails: usize = 0;
-    const pcli = parseCli(arena.allocator());
-    log_state.setExplicitBuffering(false);
+    const pcli = parseCli(init.arena.allocator(), init.minimal.args);
+    try log_state.setExplicitBuffering(init.io, false);
     for (pcli.files) |file| {
         log.info("=========== {s} ===========", .{std.fs.path.basename(file)});
         log.info("=========== START ===========", .{});
         defer _ = test_arena.reset(.retain_capacity);
-        const r = try testFile(test_arena.allocator(), file);
+        const r = try testFile(test_arena.allocator(), init.io, file);
         const res_string = if (r.fails == 0) success_str else fail_str;
 
         log.info("=========== END ===========", .{});
@@ -143,11 +147,11 @@ pub fn main() !void {
         });
         all_testcases += r.testcases;
         all_fails += r.fails;
-        try log_state.flush();
+        try log_state.flush(init.io);
     }
     log.info("This should not be rendered!", .{});
     log_state.clear();
-    log_state.setExplicitBuffering(false);
+    try log_state.setExplicitBuffering(init.io, false);
 
     log.info("=========== Results ===========", .{});
     log.info("Testcases: {}", .{all_testcases});
@@ -165,9 +169,9 @@ const TestFileResults = struct {
     }
 };
 
-fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
-    const cwd = std.fs.cwd();
-    const file_text = try cwd.readFileAlloc(tmp_alloc, path, 1 << 24);
+fn testFile(tmp_alloc: mem.Allocator, io: Io, path: []const u8) !TestFileResults {
+    const cwd = Io.Dir.cwd();
+    const file_text = try cwd.readFileAlloc(io, path, tmp_alloc, .unlimited);
     const json_file_content = try std.json.parseFromSliceLeaky(
         std.json.Value,
         tmp_alloc,
@@ -204,7 +208,7 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
         const failed = blk: {
             const doc_struct_token = mstchz.token.DocumentStructureToken.parseSliceLeaky(tmp_alloc, template) catch |e| {
                 log.err("Error occured: {}", .{e});
-                if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+                if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace);
                 break :blk true;
             };
 
@@ -217,21 +221,21 @@ fn testFile(tmp_alloc: mem.Allocator, path: []const u8) !TestFileResults {
             );
             defer vm.deinit();
 
-            var out_buf = std.ArrayList(u8).init(tmp_alloc);
-            vm.render(out_buf.writer()) catch |e| {
+            var out_buf = Io.Writer.Allocating.init(tmp_alloc);
+            vm.render(&out_buf.writer) catch |e| {
                 log.err("Error: {}", .{e});
                 break :blk true;
             };
-            log.info("\tRendered: '{s}'", .{out_buf.items});
+            log.info("\tRendered: '{s}'", .{out_buf.written()});
             log.info("\tExpected: '{s}'", .{expected_str});
 
-            if (!std.mem.eql(u8, out_buf.items, expected_str)) break :blk true;
+            if (!std.mem.eql(u8, out_buf.written(), expected_str)) break :blk true;
             break :blk false;
         };
 
         const res_str = if (failed) blk: {
             fails += 1;
-            log_state.flush() catch {};
+            log_state.flush(io) catch {};
             break :blk fail_str;
         } else blk: {
             log_state.clear();
@@ -247,10 +251,12 @@ const ParsedCli = struct {
     files: []const []const u8,
 };
 
-fn parseCli(alloc: mem.Allocator) ParsedCli {
+fn parseCli(alloc: mem.Allocator, args: std.process.Args) ParsedCli {
     var files = std.ArrayListUnmanaged([]const u8).empty;
 
-    var it = std.process.args();
+    var it = args.iterateAllocator(alloc) catch @panic("OOM");
+    defer it.deinit();
+
     _ = it.skip();
     while (it.next()) |arg| {
         files.append(alloc, arg) catch @panic("OOM");
