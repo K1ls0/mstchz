@@ -2,11 +2,14 @@ const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
 const log = std.log;
-const mstchz = @import("mstchz");
+const mstchz = @import("mstchz").Mstchz(.{
+    .with_dynamic_partials = true,
+});
 const ansii = @import("ansii.zig");
+const log_state = @import("log_state.zig");
 
 pub const std_options = std.Options{
-    .log_level = .info,
+    .log_level = .debug,
     //.logFn = logFn,
 };
 
@@ -116,14 +119,14 @@ const LogState = struct {
     }
 };
 
-var log_state: LogState = undefined;
+var lstate: LogState = undefined;
 
 const success_str = ansii.fg.bright_green ++ "passed" ++ ansii.rst;
 const fail_str = ansii.fg.bright_red ++ "failed" ++ ansii.rst;
 
 pub fn main(init: std.process.Init) !void {
-    LogState.init(&log_state, init.gpa, init.io);
-    defer log_state.deinit(init.io);
+    LogState.init(&lstate, init.gpa, init.io);
+    defer lstate.deinit(init.io);
 
     var test_arena = std.heap.ArenaAllocator.init(init.gpa);
     defer test_arena.deinit();
@@ -131,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
     var all_testcases: usize = 0;
     var all_fails: usize = 0;
     const pcli = parseCli(init.arena.allocator(), init.minimal.args);
-    try log_state.setExplicitBuffering(init.io, false);
+    try lstate.setExplicitBuffering(init.io, false);
     for (pcli.files) |file| {
         log.info("=========== {s} ===========", .{std.fs.path.basename(file)});
         log.info("=========== START ===========", .{});
@@ -157,6 +160,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("Testcases: {}", .{all_testcases});
     log.info("Sucesses: {}", .{all_testcases - all_fails});
     log.info("Fails: {}", .{all_fails});
+    log.info("=> {s}", .{if (all_fails == 0) success_str else fail_str});
     log.info("===============================", .{});
 }
 const TestFileResults = struct {
@@ -172,6 +176,11 @@ const TestFileResults = struct {
 fn testFile(tmp_alloc: mem.Allocator, io: Io, path: []const u8) !TestFileResults {
     const cwd = Io.Dir.cwd();
     const file_text = try cwd.readFileAlloc(io, path, tmp_alloc, .unlimited);
+    //fn testFile(alloc: mem.Allocator, path: []const u8) !TestFileResults {
+    //var input_arena = std.heap.ArenaAllocator.init(tmp_alloc);
+    //defer input_arena.deinit();
+    //const tmp_alloc = input_arena.allocator();
+
     const json_file_content = try std.json.parseFromSliceLeaky(
         std.json.Value,
         tmp_alloc,
@@ -191,19 +200,43 @@ fn testFile(tmp_alloc: mem.Allocator, io: Io, path: []const u8) !TestFileResults
         const case = case_v.object;
         const name = case.get("name").?.string;
         const desc = case.get("desc").?.string;
-        const data = case.get("data").?;
+        const data = &case.get("data").?;
         const template = case.get("template").?.string;
         const expected_str = case.get("expected").?.string;
-        const partials = if (case.get("partials")) |v|
+        const partials_json = if (case.get("partials")) |v|
             v.object
         else
             std.json.ObjectMap.init(tmp_alloc);
 
-        _ = partials;
+        var partials = mstchz.PartialMap.init(tmp_alloc);
+        defer {
+            var it = partials.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit();
+            }
+            partials.deinit();
+        }
+        {
+            var it = partials_json.iterator();
+            while (it.next()) |item| {
+                const parsed = try mstchz.Tokens.parse(tmp_alloc, item.value_ptr.string);
+                try partials.put(item.key_ptr.*, parsed);
+            }
+        }
 
         log.info(ansii.fg.bright_cyan ++ "Test" ++ ansii.rst ++ ": {s} ({s})", .{ name, desc });
+
+        const data_formatter = std.json.Formatter(@TypeOf(data.*)){
+            .value = data.*,
+            .options = std.json.Stringify.Options{ .whitespace = .indent_4 },
+        };
+        log.info("\tData: {f}", .{data_formatter});
         log.info("\ttemplate: `{s}`", .{template});
-        //log.info("\texpected: '{s}'", .{expected_str});
+        const partials_formatter = std.json.Formatter(std.json.Value){
+            .value = std.json.Value{ .object = partials_json },
+            .options = std.json.Stringify.Options{ .whitespace = .indent_4 },
+        };
+        log.info("\tpartials: `{f}`", .{partials_formatter});
         log.info("\tParsing..", .{});
         const failed = blk: {
             const doc_struct_token = mstchz.token.DocumentStructureToken.parseSliceLeaky(tmp_alloc, template) catch |e| {
@@ -213,6 +246,11 @@ fn testFile(tmp_alloc: mem.Allocator, io: Io, path: []const u8) !TestFileResults
             };
 
             var partials_map = std.StringHashMap(mstchz.Partial).init(tmp_alloc);
+            mstchz.RenderState.init(
+                tmp_alloc,
+                data,
+                &partials_map,
+            );
             var vm = mstchz.State.init(
                 tmp_alloc,
                 data,
@@ -227,6 +265,17 @@ fn testFile(tmp_alloc: mem.Allocator, io: Io, path: []const u8) !TestFileResults
                 break :blk true;
             };
             log.info("\tRendered: '{s}'", .{out_buf.written()});
+            const hash = mstchz.Hash{ .inner = @ptrCast(data) };
+            //var out_buf = std.ArrayList(u8).init(tmp_alloc);
+            try mstchz.renderTemplate(
+                tmp_alloc,
+                template,
+                hash,
+                mstchz.hash_impl.json.vtable,
+                &partials,
+                &out_buf.writer,
+            );
+
             log.info("\tExpected: '{s}'", .{expected_str});
 
             if (!std.mem.eql(u8, out_buf.written(), expected_str)) break :blk true;
@@ -269,7 +318,7 @@ fn parseCli(alloc: mem.Allocator, args: std.process.Args) ParsedCli {
             "./testing/spec/specs/inverted.json",
             "./testing/spec/specs/partials.json",
             "./testing/spec/specs/sections.json",
-            //"~dynamic-names.json",
+            "./testing/spec/specs/~dynamic-names.json",
             //"~inheritance.json",
             //"~lambdas.json",
         } else files.items,
@@ -281,6 +330,7 @@ fn printHelpAndExit(
     args: anytype,
     opts: struct { code: u8 = 1 },
 ) noreturn {
+    _ = opts;
     if (comptime fmt.len != 0) {
         std.debug.print(fmt ++ "\n\n", args);
     }
@@ -289,11 +339,10 @@ fn printHelpAndExit(
         var it = std.process.args();
         break :blk it.next() orelse "mstchz_tests";
     };
+
     std.debug.print(
         \\{s} <test json schema files>...
         \\
         \\
     , .{exec_name});
-
-    std.process.exit(opts.code);
 }

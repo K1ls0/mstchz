@@ -4,122 +4,50 @@ const mem = std.mem;
 const log = std.log.scoped(.mustachez);
 const assert = std.debug.assert;
 
-const default_tag_start = "{{";
-const default_tag_end = "}}";
-
-pub const DocumentStructureTokenizer = struct {
-    input: []const u8,
-    alloc: mem.Allocator,
-    tag_start: []const u8,
-    tag_end: []const u8,
-
-    state: DocumentStructureTokenTag,
-    token_start: usize,
-    brace_depth: usize,
-
-    idx: usize,
-
-    pub fn init(alloc: mem.Allocator, input: []const u8) DocumentStructureTokenizer {
-        return .{
-            .input = input,
-            .alloc = alloc,
-            .tag_start = default_tag_start,
-            .tag_end = default_tag_end,
-            .state = .text,
-            .token_start = 0,
-            .brace_depth = 0,
-            .idx = 0,
-        };
-    }
-
-    pub fn nextToken(self: *DocumentStructureTokenizer) DocumentStructureToken.ParseError!?DocumentStructureToken {
-        assert(self.idx <= self.input.len);
-
-        while (self.idx < self.input.len) {
-            assert(self.tag_start.len != 0);
-            assert(self.tag_end.len != 0);
-
-            const cc = self.input[self.idx];
-            switch (self.state) {
-                .text => {
-                    if (std.mem.startsWith(u8, self.input[self.idx..], self.tag_start)) {
-                        const new = DocumentStructureToken{
-                            .text = self.input[self.token_start..self.idx],
-                        };
-                        self.state = .tag;
-                        self.idx += self.tag_start.len;
-                        self.token_start = self.idx;
-                        return new;
-                    }
-                },
-                .tag => {
-                    const outside_braces = self.brace_depth == 0;
-                    switch (cc) {
-                        '{' => self.brace_depth += 1,
-                        '}' => {
-                            if (self.brace_depth != 0) self.brace_depth -= 1;
-                        },
-                        else => {},
-                    }
-
-                    if (std.mem.startsWith(u8, self.input[self.idx..], self.tag_end) and outside_braces) {
-                        const parsed_tag = try parseToken(self.alloc, self.input[self.token_start..self.idx]);
-                        if (parsed_tag.type == .delimiter_change) {
-                            assert(parsed_tag.body.len == 2);
-                            self.tag_start = parsed_tag.body[0];
-                            self.tag_end = parsed_tag.body[0];
-                        }
-                        const new = DocumentStructureToken{ .tag = parsed_tag };
-                        self.state = .text;
-                        self.idx += self.tag_end.len;
-                        self.token_start = self.idx;
-                        return new;
-                    }
-                },
-            }
-            self.idx += 1;
-        }
-
-        assert(self.idx <= self.input.len);
-
-        if (self.token_start < self.input.len) switch (self.state) {
-            .tag => {
-                log.err("File ends on a tag, this is invalid behaviour", .{});
-                return error.TagAtEOF;
-            },
-            .text => {
-                const new = DocumentStructureToken{
-                    .text = self.input[self.token_start..],
-                };
-                self.token_start = self.input.len;
-                return new;
-            },
-        };
-        return null;
-    }
+const TPos = struct { token: usize, position: usize };
+const TRes = union(enum) {
+    not_standalone,
+    empty,
+    pos: TPos,
 };
 
-pub const DocumentStructureTokenTag = enum { text, tag };
-pub const DocumentStructureToken = union(DocumentStructureTokenTag) {
+pub const TokenType = enum { text, tag };
+pub const Token = union(TokenType) {
     text: []const u8,
-    tag: Token,
+    tag: Tag,
 
     pub const ParseError = error{TagAtEOF} || ParseTokenError || mem.Allocator.Error;
-    pub fn parseSliceLeaky(
-        alloc: mem.Allocator,
-        input: []const u8,
-    ) ParseError![]const DocumentStructureToken {
-        var list = std.ArrayList(DocumentStructureToken).empty;
-        defer list.deinit(alloc);
-        var state = DocumentStructureTokenizer.init(alloc, input);
-        while (try state.nextToken()) |token| {
-            try list.append(alloc, token);
+    //pub fn parseSliceLeaky(
+    //    alloc: mem.Allocator,
+    //    input: []const u8,
+    //) ParseError![]const DocumentStructureToken {
+    //    var list = std.ArrayList(DocumentStructureToken).empty;
+    //    defer list.deinit(alloc);
+    //    var state = DocumentStructureTokenizer.init(alloc, input);
+    //    while (try state.nextToken()) |token| {
+    //        try list.append(alloc, token);
+    //    }
+    //    return try list.toOwnedSlice(alloc);
+    //}
+
+    pub fn debugPrint(self: Token) void {
+        switch (self) {
+            .text => |txt| {
+                std.debug.print("TEXT: {} '{s}'\n", .{ txt.len, txt });
+            },
+            .tag => |t| {
+                std.debug.print("TAG: '{s}' (standalone prefix: '{?s}') body: ", .{ @tagName(t.type), t.standalone_line_prefix });
+                for (t.body, 0..) |p, i| {
+                    if (i != 0) std.debug.print(":", .{});
+                    std.debug.print("'{s}'", .{p});
+                }
+                std.debug.print("\n", .{});
+            },
         }
-        return try list.toOwnedSlice(alloc);
     }
 };
 
-pub const TokenTag = enum {
+pub const TagType = enum {
     variable,
     section_open,
     section_close,
@@ -127,9 +55,10 @@ pub const TokenTag = enum {
     unescaped_variable,
     comment,
     partial,
+    partial_dynamic,
     delimiter_change,
 
-    pub fn fromSpecifier(c: u8) TokenTag {
+    pub fn fromSpecifier(c: u8) TagType {
         return switch (c) {
             '>' => .partial,
             '^' => .inverted_section_open,
@@ -142,47 +71,48 @@ pub const TokenTag = enum {
     }
 };
 
-pub const Token = struct {
-    type: TokenTag,
+pub const Tag = struct {
+    type: TagType,
     body: []const []const u8,
+    standalone_line_prefix: ?[]const u8 = null,
 };
 
 pub const ParseTokenError = ParseDelimsError || ParseVariableError || mem.Allocator.Error;
 
-pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!Token {
-    var trimmed = std.mem.trimEnd(u8, input, &std.ascii.whitespace);
-    //defer {
-    //    std.debug.print("||parse token out: '{s}'||", .{trimmed});
-    //}
-    assert(trimmed.len > 0);
-    var tag: TokenTag = .variable;
-    if ((trimmed[0] == '{') and (trimmed[trimmed.len - 1] == '}')) {
-        tag = .unescaped_variable;
-        trimmed = trimmed[1..(trimmed.len - 1)];
-    } else if ((trimmed[0] == '=') and (trimmed[trimmed.len - 1] == '=')) {
-        tag = .delimiter_change;
-        trimmed = trimmed[1..(trimmed.len - 1)];
-    } else {
-        tag = TokenTag.fromSpecifier(input[0]);
-        trimmed = trimmed[1..];
-    }
-    trimmed = std.mem.trim(u8, trimmed, &std.ascii.whitespace);
-
-    log.debug("{s} -> trimmed: '{s}'", .{ @tagName(tag), trimmed });
-
-    const body: []const []const u8 = switch (tag) {
-        .delimiter_change => try parseDelims(trimmed),
-        .comment => blk: {
-            break :blk &.{trimmed};
-        },
-        else => try parseVariable(tmp_alloc, trimmed),
-    };
-
-    return Token{
-        .type = tag,
-        .body = body,
-    };
-}
+//pub fn parseToken(tmp_alloc: mem.Allocator, input: []const u8) ParseTokenError!Token {
+//    var trimmed = std.mem.trimEnd(u8, input, &std.ascii.whitespace);
+//    //defer {
+//    //    std.debug.print("||parse token out: '{s}'||", .{trimmed});
+//    //}
+//    assert(trimmed.len > 0);
+//    var tag: TokenTag = .variable;
+//    if ((trimmed[0] == '{') and (trimmed[trimmed.len - 1] == '}')) {
+//        tag = .unescaped_variable;
+//        trimmed = trimmed[1..(trimmed.len - 1)];
+//    } else if ((trimmed[0] == '=') and (trimmed[trimmed.len - 1] == '=')) {
+//        tag = .delimiter_change;
+//        trimmed = trimmed[1..(trimmed.len - 1)];
+//    } else {
+//        tag = TokenTag.fromSpecifier(input[0]);
+//        trimmed = trimmed[1..];
+//    }
+//    trimmed = std.mem.trim(u8, trimmed, &std.ascii.whitespace);
+//
+//    log.debug("{s} -> trimmed: '{s}'", .{ @tagName(tag), trimmed });
+//
+//    const body: []const []const u8 = switch (tag) {
+//        .delimiter_change => try parseDelims(trimmed),
+//        .comment => blk: {
+//            break :blk &.{trimmed};
+//        },
+//        else => try parseVariable(tmp_alloc, trimmed),
+//    };
+//
+//    return Token{
+//        .type = tag,
+//        .body = body,
+//    };
+//}
 
 const ParseDelimsError = error{ EmptyOpeningDelimiter, EmptyClosingDelimiter };
 fn parseDelims(input: []const u8) ParseDelimsError!*const [2][]const u8 {
